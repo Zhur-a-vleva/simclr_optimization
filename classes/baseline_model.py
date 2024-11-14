@@ -151,5 +151,5 @@ class Baseline:
 
     def load_best_model(self):
         self.best_model.load_state_dict(torch.load(f"models/{self.name}"))
-        self.linear_classification = LinearClassification(self.best_model)
+        self.linear_classification = LinearClassification(self)
         self.metrics.set_linear_classification(self.linear_classification)

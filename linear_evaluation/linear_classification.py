@@ -22,7 +22,7 @@ class LinearClassification:
 
     def __init__(self, model):
         super().__init__()
-        self.test_model = model
+        self.test_model = model.best_model
         self.device = model.device
         self.dataset = model.dataset
         self.logger = model.logger
