@@ -23,6 +23,7 @@ class LinearClassification:
     def __init__(self, model):
         super().__init__()
         self.test_model = model.best_model
+        self.test_model_name = model.name
         self.device = model.device
         self.dataset = model.dataset
         self.logger = model.logger
@@ -115,7 +116,7 @@ class LinearClassification:
                     best_val_loss = val_loss
                     early_stopping_counter = 0
                     # save the best model
-                    torch.save(clf.state_dict(), f"linear_evaluation/logistic_model_{self.test_model.name}")
+                    torch.save(clf.state_dict(), f"linear_evaluation/logistic_model_{self.test_model_name}")
                     self.logger.info(f"Model saved at epoch {epoch + 1}")
                 else:
                     early_stopping_counter += 1
@@ -128,7 +129,7 @@ class LinearClassification:
         self.logger.info("Training complete")
 
         # load the best model for evaluation
-        clf.load_state_dict(torch.load(f"linear_evaluation/logistic_model_{self.test_model.name}"))
+        clf.load_state_dict(torch.load(f"linear_evaluation/logistic_model_{self.test_model_name}"))
 
         # final evaluation on test set
         clf.eval()
