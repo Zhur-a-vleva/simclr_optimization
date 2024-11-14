@@ -40,7 +40,7 @@ class Metrics:
 
     # model size monitoring
     def model_size(self):
-        torch.save(self.model.state_dict(), "temp.p")
+        torch.save(self.model.model.state_dict(), "temp.p")
         size = os.path.getsize("temp.p") / (1024 ** 2)  # return in MB
         os.remove("temp.p")
         return size
