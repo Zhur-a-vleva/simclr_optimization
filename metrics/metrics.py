@@ -47,7 +47,7 @@ class Metrics:
 
     def compute_inference_time(self):
         train_loader, val_loader, test_loader = self.dataset.get_loaders()
-        _, _, train_inference_time = self.linear.get_features(train_loader, self.model)
-        _, _, val_inference_time = self.linear.get_features(val_loader, self.model)
-        _, _, test_inference_time = self.linear.get_features(test_loader, self.model)
+        _, _, train_inference_time = self.linear.get_features(train_loader, self.model.best_model)
+        _, _, val_inference_time = self.linear.get_features(val_loader, self.model.best_model)
+        _, _, test_inference_time = self.linear.get_features(test_loader, self.model.best_model)
         self.metrics["inference_time_sec"].append(train_inference_time + val_inference_time + test_inference_time)
