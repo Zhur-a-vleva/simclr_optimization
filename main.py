@@ -10,7 +10,7 @@ from dataset.dataset_preparation import Dataset
 
 MODEL = "baseline"
 BATCH_SIZE = 256
-EPOCHS = 1000
+EPOCHS = 800
 LEARNING_RATE = 0.5
 TEMPERATURE = 0.5
 NUM_WORKERS = 4
