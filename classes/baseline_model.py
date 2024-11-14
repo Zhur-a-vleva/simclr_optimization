@@ -40,7 +40,7 @@ class Baseline:
         self.lr = lr
         self.epochs = epochs
         self.model = SimCLR(resnet50, output_dim=128).to(device)
-        self.best_model = None
+        self.best_model = self.model
         self.dataset = dataset
         self.linear_classification = None
         self.metrics = Metrics(self)
