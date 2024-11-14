@@ -65,7 +65,7 @@ class LinearClassification:
 
     def evaluate(self):
         self.metrics.compute_inference_time()
-        self.logger.info(f"Inference time: {self.metrics.metrcis["inference_time_sec"][-1]} sec")
+        self.logger.info(f"Inference time: {self.metrics.metrics["inference_time_sec"][-1]} sec")
 
         # linear evaluation
         for param in self.test_model.encoder.parameters():
