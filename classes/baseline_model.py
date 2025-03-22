@@ -8,27 +8,7 @@ from tqdm import tqdm
 
 from linear_evaluation.linear_classification import LinearClassification
 from metrics.metrics import Metrics
-
-
-class SimCLR(nn.Module):
-    def __init__(self, base_model, output_dim):
-        super(SimCLR, self).__init__()
-        self.encoder = base_model(weights=None)
-        self.encoder.conv1 = nn.Conv2d(3, 64, 3, 1, 1, bias=False)
-        self.encoder.maxpool = nn.Identity()
-        dim_mlp = self.encoder.fc.in_features
-        self.encoder.fc = nn.Identity()
-        self.projector = nn.Sequential(
-            nn.Linear(dim_mlp, 2048),
-            nn.ReLU(),
-            nn.Linear(2048, output_dim)
-        )
-
-    def forward(self, x):
-        h = self.encoder(x)
-        z = self.projector(h)
-        z = nn.functional.normalize(z, dim=1)
-        return h, z
+from classes.simclr import SimCLR
 
 
 class Baseline:
@@ -78,7 +58,7 @@ class Baseline:
         return val_loss / len(val_loader)
 
     def train(self):
-        train_loader, val_loader, test_loader = self.dataset.get_loaders()
+        train_loader, val_loader, _ = self.dataset.get_loaders()
 
         # Early stopping
         early_stopping_patience = 100
