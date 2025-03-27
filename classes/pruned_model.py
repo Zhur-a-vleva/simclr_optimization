@@ -16,7 +16,7 @@ from metrics.metrics import Metrics
 
 
 class Pruned:
-    def __init__(self, temperature, device, lr, epochs, dataset, logger, pruning_stages):
+    def __init__(self, temperature, device, lr, epochs, dataset, logger, pruning_stages, max_samples_for_mi=1000):
         super().__init__()
         self.name = "pruned"
         self.t = temperature
@@ -32,6 +32,7 @@ class Pruned:
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
         self.pruning_stages = pruning_stages
+        self.max_samples_for_mi = max_samples_for_mi
         self.current_stage = 0
         self.unit_registry = []  # Регистр блоков для MI
 
@@ -58,69 +59,81 @@ class Pruned:
         return clone
 
     def gaussian_mi_estimate(self, features, labels):
-        """Точная оценка MI через гауссовы смеси (по статье)"""
         n_samples, n_features = features.shape
         class_probs = torch.bincount(labels) / n_samples
 
-        # Вычисление компонент смеси
         overall_entropy = self.gaussian_entropy(features)
         conditional_entropy = 0.0
 
         for c in torch.unique(labels):
             class_mask = (labels == c)
             class_features = features[class_mask]
-            conditional_entropy += class_probs[c] * self.gaussian_entropy(class_features)
+            class_entropy = self.gaussian_entropy(class_features)
+            conditional_entropy += class_probs[c] * class_entropy
 
         return (overall_entropy - conditional_entropy).item()
 
-    def gaussian_entropy(self, X):
-        """Энтропия гауссовой смеси (формула из статьи)"""
+    def gaussian_entropy(self, X, sample_size=500):  # Уменьшить sample_size для ускорения
         n_samples, n_features = X.shape
-        pairwise_dists = torch.cdist(X, X) ** 2
 
+        # Используем подвыборку для вычисления sigma
+        if n_samples > sample_size:
+            indices = torch.randperm(n_samples)[:sample_size]
+            X_sample = X[indices]
+        else:
+            X_sample = X
+
+        pairwise_dists = torch.cdist(X_sample, X_sample) ** 2
         sigma = torch.median(pairwise_dists) / (2 * np.log(n_samples + 1))
-        kernel_matrix = torch.exp(-pairwise_dists / (2 * sigma))
 
-        entropy_estimate = -torch.log(torch.mean(kernel_matrix, dim=1)).mean()
+        # Вычисляем kernel_matrix для всех точек (теперь n_samples <= 1000)
+        kernel_matrix = torch.exp(-torch.cdist(X, X) ** 2 / (2 * sigma))
+        entropy_estimate = -torch.log(kernel_matrix.mean(dim=1)).mean()
+
         return entropy_estimate
 
     def estimate_units_mi(self, dataloader):
-        """Оценка MI для всех блоков"""
         self.model.eval()
-        activations = {}  # Initialize as a dictionary of lists for each unit
-        labels = []
-
-        # Initialize each unit's activation list
-        for unit in self.unit_registry:
-            activations[unit['name']] = []
-
-        # Register hooks to append activations to the lists
-        hooks = []
-        for unit in self.unit_registry:
-            hooks.append(unit['module'].register_forward_hook(
-                lambda m, i, o, name=unit['name']: activations[name].append(o.detach().flatten(start_dim=1))
-            ))
-
-        # Collect activations and labels across all batches
-        with torch.no_grad():
-            for (x_i, _), y in dataloader:
-                x_i = x_i.to(self.device)
-                _ = self.model(x_i)  # Forward pass to trigger hooks
-                labels.append(y.to(self.device))  # Collect labels
-
-        # Concatenate labels from all batches
-        labels = torch.cat(labels)
-
         mi_values = []
+
         for unit in self.unit_registry:
-            # Concatenate all batches' activations for this unit
-            features = torch.cat(activations[unit['name']], dim=0)
+            activations = []
+            labels = []
+            collected = 0  # Счетчик собранных образцов
+            hook = None
+
+            # Регистрация хука только для текущего блока
+            def save_activation(m, i, o):
+                nonlocal collected
+                features = o.detach().flatten(start_dim=1)
+                activations.append(features.cuda())  # Хранить на GPU
+                collected += features.shape[0]
+                if collected >= self.max_samples_for_mi:
+                    self.stop_data_collection = True  # Флаг для остановки сбора данных
+
+            hook = unit['module'].register_forward_hook(save_activation)
+
+            self.stop_data_collection = False
+
+            with torch.no_grad():
+                for (x_i, _), y in dataloader:
+                    if self.stop_data_collection:
+                        break
+                    x_i = x_i.to(self.device)
+                    self.model(x_i)
+                    labels.append(y.to(self.device))
+
+            # Объединение активаций и меток
+            features = torch.cat(activations, dim=0)[:self.max_samples_for_mi]
+            labels = torch.cat(labels)[:self.max_samples_for_mi].to(self.device)
+
             mi = self.gaussian_mi_estimate(features, labels)
             mi_values.append(mi)
 
-        # Remove hooks after processing all units (only once)
-        for hook in hooks:
+            # Очистка памяти
             hook.remove()
+            del activations, features, labels
+            torch.cuda.empty_cache()  # Очистка GPU-памяти
 
         return np.array(mi_values)
 
