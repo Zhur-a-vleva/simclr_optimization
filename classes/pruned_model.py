@@ -157,22 +157,20 @@ class Pruned:
 
     def prune_units(self, keep_indices):
         """Обрезка блоков в ResNet50 с сохранением структуры"""
-        # Собираем все слои модели
-        all_layers = []
-        for name, module in self.model.encoder.named_children():
-            if name.startswith('layer'):
-                all_layers.append(module)
+        # Собираем все слои модели, включая начальные (conv1, bn1 и т.д.)
+        all_layers = list(self.model.encoder.children())
 
-        # Модифицируем последний слой (layer4)
+        # Модифицируем только layer4 (предполагается, что это 4-й элемент в all_layers)
         layer4_modules = []
-        for idx, module in enumerate(all_layers[3]):
+        # layer4 сам по себе является Sequential, поэтому берем его children()
+        for idx, module in enumerate(all_layers[3]):  # 3 — индекс layer4
             if idx in keep_indices:
                 layer4_modules.append(module)
 
-        # Создаем новый последовательный слой
+        # Заменяем layer4 на обрезанный вариант
         all_layers[3] = nn.Sequential(*layer4_modules)
 
-        # Пересобираем модель
+        # Пересобираем модель, сохранив все слои
         self.model.encoder = nn.Sequential(*all_layers)
         self.update_model_metrics()
 
