@@ -87,37 +87,40 @@ class Pruned:
     def estimate_units_mi(self, dataloader):
         """Оценка MI для всех блоков"""
         self.model.eval()
-        activations = {}
+        activations = {}  # Initialize as a dictionary of lists for each unit
         labels = []
 
-        # Регистрация хуков
-        hooks = []
+        # Initialize each unit's activation list
+        for unit in self.unit_registry:
+            activations[unit['name']] = []
 
-        # Регистрация хуков для Bottleneck блоков
+        # Register hooks to append activations to the lists
         hooks = []
         for unit in self.unit_registry:
             hooks.append(unit['module'].register_forward_hook(
-                lambda m, i, o, name=unit['name']: activations.update({name: o.detach().flatten(start_dim=1)})
+                lambda m, i, o, name=unit['name']: activations[name].append(o.detach().flatten(start_dim=1))
             ))
 
-        # Сбор данных
+        # Collect activations and labels across all batches
         with torch.no_grad():
             for (x_i, _), y in dataloader:
                 x_i = x_i.to(self.device)
-                _ = self.model(x_i)
-                labels.append(y.to(self.device))
+                _ = self.model(x_i)  # Forward pass to trigger hooks
+                labels.append(y.to(self.device))  # Collect labels
 
+        # Concatenate labels from all batches
         labels = torch.cat(labels)
-        mi_values = []
 
+        mi_values = []
         for unit in self.unit_registry:
-            features = torch.cat([activations[unit['name']]])
+            # Concatenate all batches' activations for this unit
+            features = torch.cat(activations[unit['name']], dim=0)
             mi = self.gaussian_mi_estimate(features, labels)
             mi_values.append(mi)
 
-            # Очистка хуков
-            for hook in hooks:
-                hook.remove()
+        # Remove hooks after processing all units (only once)
+        for hook in hooks:
+            hook.remove()
 
         return np.array(mi_values)
 
