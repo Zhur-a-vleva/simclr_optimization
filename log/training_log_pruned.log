@@ -1,5 +1,0 @@
-2025-03-09 14:52:29,646 - INFO - Log started
-2025-03-09 14:52:29,646 - INFO - Constants set: MODEL=pruned, BATCH_SIZE=256, EPOCHS=1, LEARNING_RATE=0.5, TEMPERATURE=0.5, NUM_WORKERS=4, DEVICE=cpu, PRUNING_STAGES=3
-2025-03-09 14:52:29,646 - INFO - Dataset download...
-2025-03-09 14:52:32,327 - INFO - Data loaded and transformed
-2025-03-09 14:52:34,363 - INFO - Model initialized

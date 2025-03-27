@@ -1,5 +1,4 @@
 import time
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,35 +8,38 @@ from torchvision.models import resnet50
 from tqdm import tqdm
 from thop import profile
 from torchvision.models.resnet import Bottleneck
-
 from classes.simclr import SimCLR
 from linear_evaluation.linear_classification import LinearClassification
 from metrics.metrics import Metrics
 
 
-class Pruned:
+class PrunedDCL():
     def __init__(self, temperature, device, lr, epochs, dataset, logger, pruning_stages):
         super().__init__()
-        self.name = "pruned"
+        self.name = "pruned_dcl"
         self.t = temperature
         self.device = device
         self.lr = lr
         self.epochs = epochs
+
+        # Модель на базе реснета
         self.model = SimCLR(resnet50, output_dim=128).to(device)
-        self.original_model = self.clone_model()  # Для подсчёта FLOPs
+        self.original_model = self.clone_model()  # для подсчёта FLOPs (как в исходном коде)
         self.best_model = self.model
+
         self.dataset = dataset
         self.linear_classification = None
         self.metrics = Metrics(self)
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
+
+        # Параметры для этапов pruning
         self.pruning_stages = pruning_stages
         self.current_stage = 0
-        self.unit_registry = []  # Регистр блоков для MI
+        self.unit_registry = []  # реестр bottleneck-блоков для MI-анализа
 
-        """Идентификация блоков в стандартном ResNet50"""
+        # Регистрируем все Bottleneck-блоки из ResNet50
         for name, module in self.model.encoder.named_modules():
-            # Регистрируем все Bottleneck блоки
             if isinstance(module, Bottleneck):
                 self.unit_registry.append({
                     'name': name,
@@ -45,27 +47,64 @@ class Pruned:
                     'type': 'bottleneck'
                 })
 
+        # Оптимизатор и планировщик
         self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
-
         train_loader, _, _ = dataset.get_loaders()
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs * len(train_loader),
-                                                                    eta_min=1e-3)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=epochs * len(train_loader),
+            eta_min=1e-3
+        )
 
     def clone_model(self):
-        """Клонирование модели для подсчёта FLOPs"""
+        """Клонируем модель, чтобы прикинуть FLOPs."""
         clone = SimCLR(resnet50, output_dim=128).to(self.device)
         clone.load_state_dict(self.model.state_dict())
         return clone
 
+    # =============== DCL LOSS (вместо InfoNCE) ===================
+    def dcl_loss(self, z_i, z_j):
+        """
+        Реализация Decoupled Contrastive Learning (DCL), убирая позитивный член из знаменателя,
+        чтобы не было 'negative-positive coupling'. См. Yeh et al. (2022).
+        """
+        N = z_i.size(0)
+        # Склеиваем в один батч, итоговый размер [2N, dim]
+        z = torch.cat([z_i, z_j], dim=0)
+        z = nn.functional.normalize(z, dim=1)
+
+        # Матрица сходств [2N x 2N]
+        sim = torch.matmul(z, z.T) / self.t
+        exp_sim = torch.exp(sim)
+
+        # Для i < N -> i+N, для i >= N -> i-N (положительные пары)
+        pos_index = torch.arange(2 * N, device=self.device)
+        pos_index[:N] += N
+        pos_index[N:] -= N
+
+        # Убираем из знаменателя диагональ (self-сходство) и позитив
+        exp_sim.fill_diagonal_(0.)
+        exp_sim[torch.arange(2 * N), pos_index] = 0.
+
+        # Знаменатель = сумма по строке
+        denom = exp_sim.sum(dim=1)  # [2N]
+        # Числитель = e^( sim(i, pos_i) )
+        pos_vals = torch.exp(sim[torch.arange(2 * N), pos_index])
+
+        # loss = - log( pos / denom )
+        loss = -torch.log(pos_vals / denom)
+        return loss.mean()
+
+    # ===============================
+
+    # =========== MI-методы (как в Pruned) =========================
     def gaussian_mi_estimate(self, features, labels):
-        """Точная оценка MI через гауссовы смеси (по статье)"""
+        """Оценка I(X;Y) через гауссову смесь (примерно)."""
         n_samples, n_features = features.shape
         class_probs = torch.bincount(labels) / n_samples
 
-        # Вычисление компонент смеси
         overall_entropy = self.gaussian_entropy(features)
         conditional_entropy = 0.0
-
         for c in torch.unique(labels):
             class_mask = (labels == c)
             class_features = features[class_mask]
@@ -74,10 +113,11 @@ class Pruned:
         return (overall_entropy - conditional_entropy).item()
 
     def gaussian_entropy(self, X):
-        """Энтропия гауссовой смеси (формула из статьи)"""
+        """Энтропия на основе RBF kernel."""
         n_samples, n_features = X.shape
         pairwise_dists = torch.cdist(X, X) ** 2
 
+        # sigma по медиане
         sigma = torch.median(pairwise_dists) / (2 * np.log(n_samples + 1))
         kernel_matrix = torch.exp(-pairwise_dists / (2 * sigma))
 
@@ -85,104 +125,98 @@ class Pruned:
         return entropy_estimate
 
     def estimate_units_mi(self, dataloader):
-        """Оценка MI для всех блоков"""
+        """Собираем активации (output) в bottleneck-блоках, считаем MI."""
         self.model.eval()
         activations = {}
-        labels = []
+        labels_list = []
 
-        # Регистрация хуков
         hooks = []
-
-        # Регистрация хуков для Bottleneck блоков
-        hooks = []
+        # Регистрируем хуки на каждый block
         for unit in self.unit_registry:
-            hooks.append(unit['module'].register_forward_hook(
-                lambda m, i, o, name=unit['name']: activations.update({name: o.detach().flatten(start_dim=1)})
-            ))
+            module = unit['module']
+            name = unit['name']
 
-        # Сбор данных
+            def hook_fn(m, i, o, nm=name):
+                activations[nm] = o.detach().flatten(start_dim=1)
+
+            h = module.register_forward_hook(hook_fn)
+            hooks.append(h)
+
+        # Прогоняем через модель
         with torch.no_grad():
             for (x_i, _), y in dataloader:
                 x_i = x_i.to(self.device)
-                _ = self.model(x_i)
-                labels.append(y.to(self.device))
+                _ = self.model(x_i)  # forward
+                labels_list.append(y.to(self.device))
 
-        labels = torch.cat(labels)
+        # Сняли хуки
+        for h in hooks:
+            h.remove()
+
+        labels = torch.cat(labels_list)
         mi_values = []
 
+        # Считаем MI для каждого Bottleneck
         for unit in self.unit_registry:
-            features = torch.cat([activations[unit['name']]])
+            name = unit['name']
+            features = activations[name]
             mi = self.gaussian_mi_estimate(features, labels)
             mi_values.append(mi)
-
-            # Очистка хуков
-            for hook in hooks:
-                hook.remove()
 
         return np.array(mi_values)
 
     def adaptive_clustering(self, mi_values):
-        """Адаптивная кластеризация на основе плотности MI"""
+        """Адаптивная кластеризация и выбор 'лучших' блоков."""
         if self.current_stage < self.pruning_stages // 2:
-            n_clusters = max(2, len(mi_values) // 3)  # Агрессивная обрезка
+            n_clusters = max(2, len(mi_values) // 3)  # агрессивная обрезка
         else:
-            n_clusters = max(2, len(mi_values) // 5)  # Консервативная
+            n_clusters = max(2, len(mi_values) // 5)  # консервативная
 
         kmeans = KMeans(n_clusters=n_clusters)
-        clusters = kmeans.fit_predict(mi_values.reshape(-1, 1))
+        arr_reshaped = mi_values.reshape(-1, 1)
+        clusters = kmeans.fit_predict(arr_reshaped)
 
         keep_indices = []
         for cluster_id in np.unique(clusters):
             cluster_mi = mi_values[clusters == cluster_id]
-            keep_idx = np.argmax(cluster_mi)  # Сохраняем наиболее информативные
-            keep_indices.append(keep_idx)
+            # оставляем наиболее информативный (max MI)
+            idx = np.argmax(cluster_mi)
+            # надо понять, какой именно это индекс среди всего массива
+            # np.where(...) вернуть настоящие индексы
+            actual_idx = np.where(clusters == cluster_id)[0][idx]  # внутри кластера
+            keep_indices.append(actual_idx)
 
         return keep_indices
 
     def prune_units(self, keep_indices):
-        """Обрезка блоков в ResNet50 с сохранением структуры"""
-        # Собираем все слои модели
+        """
+        Удаляем из layer4 (для примера) Bottleneck'и, которые не в keep_indices.
+        По аналогии с исходным кодом.
+        """
         all_layers = []
         for name, module in self.model.encoder.named_children():
             if name.startswith('layer'):
                 all_layers.append(module)
 
-        # Модифицируем последний слой (layer4)
+        # layer4 - последний, индекса 3
         layer4_modules = []
         for idx, module in enumerate(all_layers[3]):
             if idx in keep_indices:
                 layer4_modules.append(module)
 
-        # Создаем новый последовательный слой
         all_layers[3] = nn.Sequential(*layer4_modules)
-
-        # Пересобираем модель
         self.model.encoder = nn.Sequential(*all_layers)
         self.update_model_metrics()
 
     def update_model_metrics(self):
-        """Обновление метрик модели"""
-        # Подсчёт параметров
+        """Обновить метрики params/flops."""
         params = sum(p.numel() for p in self.model.parameters())
-
-        # Подсчёт FLOPs с использованием текущей модели
-        input = torch.randn(1, 3, 224, 224).to(self.device)
-        flops, _ = profile(self.model, inputs=(input,))
-
+        input_data = torch.randn(1, 3, 224, 224).to(self.device)
+        flops, _ = profile(self.model, inputs=(input_data,))
         self.metrics.metrics['params'] = params
         self.metrics.metrics['flops'] = flops
 
-    def nt_xent_loss(self, z_i, z_j):
-        N = 2 * z_i.size(0)
-        z = torch.cat((z_i, z_j), dim=0)
-        z = nn.functional.normalize(z, dim=1)
-        similarity_matrix = torch.matmul(z, z.T) / self.t
-        mask = (~torch.eye(N, N, dtype=bool)).to(self.device)
-        exp_sim = torch.exp(similarity_matrix) * mask
-        sum_exp_sim = exp_sim.sum(dim=1, keepdim=True)
-        positive_sim = torch.exp(torch.sum(z_i * z_j, dim=1) / self.t)
-        loss = -torch.log(positive_sim / sum_exp_sim[:z_i.size(0)])
-        return loss.mean()
+    # =============================================================
 
     def validate(self, val_loader):
         self.model.eval()
@@ -192,15 +226,14 @@ class Pruned:
                 x_i, x_j = x_i.to(self.device), x_j.to(self.device)
                 _, z_i = self.model(x_i)
                 _, z_j = self.model(x_j)
-                loss = self.nt_xent_loss(z_i, z_j)
+                # Используем DCL-loss
+                loss = self.dcl_loss(z_i, z_j)
                 val_loss += loss.item()
-
         return val_loss / len(val_loader)
 
     def train(self):
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
-        # Early stopping
         early_stopping_patience = 100
         best_val_loss = float('inf')
         early_stopping_counter = 0
@@ -215,19 +248,21 @@ class Pruned:
             batch_bar = tqdm(train_loader, desc=f"Training Epoch {epoch + 1}", leave=False, position=1)
 
             for (x_i, x_j), _ in batch_bar:
-                x_i = x_i.to(self.device)
-                x_j = x_j.to(self.device)
-
+                x_i, x_j = x_i.to(self.device), x_j.to(self.device)
                 self.optimizer.zero_grad()
+
+                # forward pass
                 _, z_i = self.model(x_i)
                 _, z_j = self.model(x_j)
-                loss = self.nt_xent_loss(z_i, z_j)
+
+                # === DCL-loss ===
+                loss = self.dcl_loss(z_i, z_j)
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()
+
                 epoch_loss += loss.item()
 
-            # save metrics
             training_time = time.time() - start_time
             self.metrics.metrics["contrastive_loss"].append(epoch_loss / len(train_loader))
             self.metrics.metrics["training_time_per_epoch_sec"].append(training_time)
@@ -235,15 +270,14 @@ class Pruned:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Этап обрезки
+            # Этап pruning каждые 10 эпох, например
             if epoch % 10 == 0 and epoch > 0:
                 mi_values = self.estimate_units_mi(train_loader)
                 keep_indices = self.adaptive_clustering(mi_values)
                 self.prune_units(keep_indices)
-
                 self.logger.info(
                     f"Stage {self.current_stage}: "
-                    f"Kept {len(keep_indices)} units, "
+                    f"Kept {len(keep_indices)} bottlenecks, "
                     f"Params: {self.metrics.metrics['params'] / 1e6:.2f}M, "
                     f"FLOPs: {self.metrics.metrics['flops'] / 1e9:.2f}G"
                 )
@@ -252,12 +286,13 @@ class Pruned:
             # Валидация
             val_loss = self.validate(val_loader)
             self.logger.info(
-                f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "
-                f"Validation Loss: {val_loss}, "
+                f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader):.4f}, "
+                f"Validation Loss: {val_loss:.4f}, "
                 f"GPU Util: {self.metrics.metrics['gpu_utilization_percent'][-1]}%, "
-                f"Training time per epoch: {self.metrics.metrics['training_time_per_epoch_sec'][-1]} sec,"
-                f"Memory usage: {self.metrics.metrics['memory_usage_MB'][-1]} MB,"
-                f"Model size: {self.metrics.metrics["model_size_MB"][-1]} MB")
+                f"Training time: {training_time:.2f} sec, "
+                f"Memory usage: {self.metrics.metrics['memory_usage_MB'][-1]} MB, "
+                f"Model size: {self.metrics.metrics['model_size_MB'][-1]} MB"
+            )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -267,7 +302,6 @@ class Pruned:
             else:
                 early_stopping_counter += 1
 
-            # check early stopping condition
             if early_stopping_counter >= early_stopping_patience:
                 self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
                 break
@@ -287,3 +321,5 @@ class Pruned:
         self.best_model.load_state_dict(torch.load(f"models/{self.name}"))
         self.linear_classification = LinearClassification(self)
         self.metrics.set_linear_classification(self.linear_classification)
+
+
