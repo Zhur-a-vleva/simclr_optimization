@@ -157,20 +157,28 @@ class Pruned:
 
     def prune_units(self, keep_indices):
         """Обрезка блоков в ResNet50 с сохранением структуры"""
-        # Собираем все слои модели, включая начальные (conv1, bn1 и т.д.)
-        all_layers = list(self.model.encoder.children())
+        all_layers = list(self.model.encoder.children())  # Собираем все слои модели
 
-        # Модифицируем только layer4 (предполагается, что это 4-й элемент в all_layers)
+        # Проверяем, является ли layer4 Sequential (если нет, пропускаем обрезку)
+        if not isinstance(all_layers[3], nn.Sequential):
+            return  # layer4 уже обрезан до Identity, ничего не делаем
+
+        # Получаем текущий layer4
+        layer4 = all_layers[3]
+
+        # Фильтруем блоки внутри layer4 по keep_indices
         layer4_modules = []
-        # layer4 сам по себе является Sequential, поэтому берем его children()
-        for idx, module in enumerate(all_layers[3]):  # 3 — индекс layer4
+        for idx, module in enumerate(layer4):  # Теперь точно работаем с Sequential
             if idx in keep_indices:
                 layer4_modules.append(module)
 
-        # Заменяем layer4 на обрезанный вариант
-        all_layers[3] = nn.Sequential(*layer4_modules)
+        # Если не осталось блоков, заменяем layer4 на Identity
+        if not layer4_modules:
+            all_layers[3] = nn.Identity()  # Заменяем на Identity, если нет блоков
+        else:
+            all_layers[3] = nn.Sequential(*layer4_modules)  # Обрезанный layer4
 
-        # Пересобираем модель, сохранив все слои
+        # Пересобираем модель
         self.model.encoder = nn.Sequential(*all_layers)
         self.update_model_metrics()
 
