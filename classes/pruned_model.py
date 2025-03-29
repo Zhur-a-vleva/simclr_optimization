@@ -36,6 +36,9 @@ class Pruned:
         self.current_stage = 0
         self.unit_registry = []  # Регистр блоков для MI
 
+        # Initialize metrics immediately
+        self.update_model_metrics()
+
         """Идентификация блоков в стандартном ResNet50"""
         for name, module in self.model.encoder.named_modules():
             # Регистрируем все Bottleneck блоки
