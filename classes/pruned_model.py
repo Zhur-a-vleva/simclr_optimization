@@ -184,15 +184,18 @@ class Pruned:
 
     def update_model_metrics(self):
         """Обновление метрик модели"""
-        # Подсчёт параметров
+        # Подсчёт параметров и немедленное сохранение
         params = sum(p.numel() for p in self.model.parameters())
+        self.metrics.metrics['params'] = params  # Сохраняем параметры немедленно
 
-        # Подсчёт FLOPs с использованием текущей модели
-        input = torch.randn(1, 3, 224, 224).to(self.device)
-        flops, _ = profile(self.model, inputs=(input,))
-
-        self.metrics.metrics['params'] = params
-        self.metrics.metrics['flops'] = flops
+        # Подсчёт FLOPs с обработкой ошибок
+        try:
+            input = torch.randn(1, 3, 224, 224).to(self.device)
+            flops, _ = profile(self.model, inputs=(input,))
+            self.metrics.metrics['flops'] = flops
+        except Exception as e:
+            self.logger.error(f"Ошибка при расчете FLOPs: {e}")
+            self.metrics.metrics['flops'] = None  # Можно установить значение по умолчанию или None
 
     def nt_xent_loss(self, z_i, z_j):
         N = 2 * z_i.size(0)
