@@ -1,22 +1,18 @@
 import time
-
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.cluster import KMeans
 from torchvision.models import resnet50
 from tqdm import tqdm
-from thop import profile
-from torchvision.models.resnet import Bottleneck
+import numpy as np
 
-from classes.simclr import SimCLR
 from linear_evaluation.linear_classification import LinearClassification
 from metrics.metrics import Metrics
+from classes.simclr import SimCLR
 
 
 class Pruned:
-    def __init__(self, temperature, device, lr, epochs, dataset, logger, pruning_stages, max_samples_for_mi=1000):
+    def __init__(self, temperature, device, lr, epochs, dataset, logger):
         super().__init__()
         self.name = "pruned"
         self.t = temperature
@@ -24,181 +20,21 @@ class Pruned:
         self.lr = lr
         self.epochs = epochs
         self.model = SimCLR(resnet50, output_dim=128).to(device)
-        self.original_model = self.clone_model()  # Для подсчёта FLOPs
         self.best_model = self.model
         self.dataset = dataset
         self.linear_classification = None
         self.metrics = Metrics(self)
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
-        self.pruning_stages = pruning_stages
-        self.max_samples_for_mi = max_samples_for_mi
-        self.current_stage = 0
-        self.unit_registry = []  # Регистр блоков для MI
-
-        # Initialize metrics immediately
-        self.update_model_metrics()
-
-        """Идентификация блоков в стандартном ResNet50"""
-        for name, module in self.model.encoder.named_modules():
-            # Регистрируем все Bottleneck блоки
-            if isinstance(module, Bottleneck):
-                self.unit_registry.append({
-                    'name': name,
-                    'module': module,
-                    'type': 'bottleneck'
-                })
-
         self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
 
         train_loader, _, _ = dataset.get_loaders()
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs * len(train_loader),
                                                                     eta_min=1e-3)
-
-    def clone_model(self):
-        """Клонирование модели для подсчёта FLOPs"""
-        clone = SimCLR(resnet50, output_dim=128).to(self.device)
-        clone.load_state_dict(self.model.state_dict())
-        return clone
-
-    def gaussian_mi_estimate(self, features, labels):
-        n_samples, n_features = features.shape
-        class_probs = torch.bincount(labels) / n_samples
-
-        overall_entropy = self.gaussian_entropy(features)
-        conditional_entropy = 0.0
-
-        for c in torch.unique(labels):
-            class_mask = (labels == c)
-            class_features = features[class_mask]
-            class_entropy = self.gaussian_entropy(class_features)
-            conditional_entropy += class_probs[c] * class_entropy
-
-        return (overall_entropy - conditional_entropy).item()
-
-    def gaussian_entropy(self, X, sample_size=500):  # Уменьшить sample_size для ускорения
-        n_samples, n_features = X.shape
-
-        # Используем подвыборку для вычисления sigma
-        if n_samples > sample_size:
-            indices = torch.randperm(n_samples)[:sample_size]
-            X_sample = X[indices]
-        else:
-            X_sample = X
-
-        pairwise_dists = torch.cdist(X_sample, X_sample) ** 2
-        sigma = torch.median(pairwise_dists) / (2 * np.log(n_samples + 1))
-
-        # Вычисляем kernel_matrix для всех точек (теперь n_samples <= 1000)
-        kernel_matrix = torch.exp(-torch.cdist(X, X) ** 2 / (2 * sigma))
-        entropy_estimate = -torch.log(kernel_matrix.mean(dim=1)).mean()
-
-        return entropy_estimate
-
-    def estimate_units_mi(self, dataloader):
-        self.model.eval()
-        mi_values = []
-
-        for unit in self.unit_registry:
-            activations = []
-            labels = []
-            collected = 0  # Счетчик собранных образцов
-            hook = None
-
-            # Регистрация хука только для текущего блока
-            def save_activation(m, i, o):
-                nonlocal collected
-                features = o.detach().flatten(start_dim=1)
-                activations.append(features.cuda())  # Хранить на GPU
-                collected += features.shape[0]
-                if collected >= self.max_samples_for_mi:
-                    self.stop_data_collection = True  # Флаг для остановки сбора данных
-
-            hook = unit['module'].register_forward_hook(save_activation)
-
-            self.stop_data_collection = False
-
-            with torch.no_grad():
-                for (x_i, _), y in dataloader:
-                    if self.stop_data_collection:
-                        break
-                    x_i = x_i.to(self.device)
-                    self.model(x_i)
-                    labels.append(y.to(self.device))
-
-            # Объединение активаций и меток
-            features = torch.cat(activations, dim=0)[:self.max_samples_for_mi]
-            labels = torch.cat(labels)[:self.max_samples_for_mi].to(self.device)
-
-            mi = self.gaussian_mi_estimate(features, labels)
-            mi_values.append(mi)
-
-            # Очистка памяти
-            hook.remove()
-            del activations, features, labels
-            torch.cuda.empty_cache()  # Очистка GPU-памяти
-
-        return np.array(mi_values)
-
-    def adaptive_clustering(self, mi_values):
-        """Адаптивная кластеризация на основе плотности MI"""
-        if self.current_stage < self.pruning_stages // 2:
-            n_clusters = max(2, len(mi_values) // 3)  # Агрессивная обрезка
-        else:
-            n_clusters = max(2, len(mi_values) // 5)  # Консервативная
-
-        kmeans = KMeans(n_clusters=n_clusters)
-        clusters = kmeans.fit_predict(mi_values.reshape(-1, 1))
-
-        keep_indices = []
-        for cluster_id in np.unique(clusters):
-            cluster_mi = mi_values[clusters == cluster_id]
-            keep_idx = np.argmax(cluster_mi)  # Сохраняем наиболее информативные
-            keep_indices.append(keep_idx)
-
-        return keep_indices
-
-    def prune_units(self, keep_indices):
-        """Обрезка блоков в ResNet50 с сохранением структуры"""
-        all_layers = list(self.model.encoder.children())  # Собираем все слои модели
-
-        # Проверяем, является ли layer4 Sequential (если нет, пропускаем обрезку)
-        if not isinstance(all_layers[3], nn.Sequential):
-            return  # layer4 уже обрезан до Identity, ничего не делаем
-
-        # Получаем текущий layer4
-        layer4 = all_layers[3]
-
-        # Фильтруем блоки внутри layer4 по keep_indices
-        layer4_modules = []
-        for idx, module in enumerate(layer4):  # Теперь точно работаем с Sequential
-            if idx in keep_indices:
-                layer4_modules.append(module)
-
-        # Если не осталось блоков, заменяем layer4 на Identity
-        if not layer4_modules:
-            all_layers[3] = nn.Identity()  # Заменяем на Identity, если нет блоков
-        else:
-            all_layers[3] = nn.Sequential(*layer4_modules)  # Обрезанный layer4
-
-        # Пересобираем модель
-        self.model.encoder = nn.Sequential(*all_layers)
-        self.update_model_metrics()
-
-    def update_model_metrics(self):
-        """Обновление метрик модели"""
-        # Подсчёт параметров и немедленное сохранение
-        params = sum(p.numel() for p in self.model.parameters())
-        self.metrics.metrics['params'] = params  # Сохраняем параметры немедленно
-
-        # Подсчёт FLOPs с обработкой ошибок
-        try:
-            input = torch.randn(1, 3, 224, 224).to(self.device)
-            flops, _ = profile(self.model, inputs=(input,))
-            self.metrics.metrics['flops'] = flops
-        except Exception as e:
-            self.logger.error(f"Ошибка при расчете FLOPs: {e}")
-            self.metrics.metrics['flops'] = None  # Можно установить значение по умолчанию или None
+        # Keep track of feature maps and their information content
+        self.feature_maps = {}
+        self.mutual_info = {}
+        self.active_units = set(range(len(self.model.encoder._modules)))
 
     def nt_xent_loss(self, z_i, z_j):
         N = 2 * z_i.size(0)
@@ -225,7 +61,233 @@ class Pruned:
 
         return val_loss / len(val_loader)
 
-    def train(self):
+    def compute_mutual_information(self, feature_maps, labels):
+        """
+        Compute mutual information between feature maps and output labels
+        using Gaussian Mixture Model approximation with improved numerical stability.
+        """
+        mutual_info = {}
+
+        for unit_idx, features in feature_maps.items():
+            # Flatten features to vectors
+            features = features.reshape(features.size(0), -1)
+
+            # Separate features by class
+            class_features = {}
+            for i in range(len(labels)):
+                label = labels[i].item()
+                if label not in class_features:
+                    class_features[label] = []
+                class_features[label].append(features[i])
+
+            # Calculate means for each class
+            class_means = {}
+            for label, feats in class_features.items():
+                class_means[label] = torch.stack(feats).mean(dim=0)
+
+            # Estimate sigma for GMM - using a more robust approach
+            # Use the average pairwise distance as a basis for sigma
+            total_dist = 0.0
+            count = 0
+            for i in range(min(100, len(features))):  # Sample to avoid O(n²) complexity
+                for j in range(i + 1, min(100, len(features))):
+                    dist = torch.sum((features[i] - features[j]) ** 2).item()
+                    total_dist += dist
+                    count += 1
+
+            # Set sigma based on average distance (avoid division by zero)
+            sigma = np.sqrt(total_dist / max(1, count)) + 1e-8
+
+            # Upper bound on mutual information
+            num_classes = len(class_means)
+            n = len(labels)
+
+            # Calculate first term: H(T) with numerical stability
+            h_t = 0
+            for i in range(min(100, n)):  # Sample to reduce computation
+                for j in range(min(100, n)):
+                    if i != j:  # Skip self-comparisons
+                        dist_sq = torch.sum((features[i] - features[j]) ** 2).item()
+                        # Use a numerically stable approach
+                        h_t += -dist_sq / (2 * sigma ** 2)  # log space calculation
+
+            # Normalize properly
+            sample_size = min(100, n)
+            h_t = h_t / (sample_size * (sample_size - 1)) if sample_size > 1 else 0
+
+            # Calculate second term: H(T|Y) with numerical stability
+            h_t_given_y = 0
+            total_weight = 0
+
+            for label, feats in class_features.items():
+                n_k = len(feats)
+                if n_k <= 1:  # Skip classes with only one sample
+                    continue
+
+                class_sum = 0
+                feats_tensor = torch.stack(feats)
+
+                # Sample if there are too many features in this class
+                sample_size_k = min(100, n_k)
+                indices = torch.randperm(n_k)[:sample_size_k]
+                feats_tensor = feats_tensor[indices]
+
+                for i in range(sample_size_k):
+                    for j in range(sample_size_k):
+                        if i != j:  # Skip self-comparisons
+                            dist_sq = torch.sum((feats_tensor[i] - feats_tensor[j]) ** 2).item()
+                            # Use a numerically stable approach
+                            class_sum += -dist_sq / (4 * sigma ** 2)  # log space calculation
+
+                # Normalize properly
+                norm_class_sum = class_sum / (sample_size_k * (sample_size_k - 1)) if sample_size_k > 1 else 0
+                h_t_given_y += (n_k / n) * norm_class_sum
+                total_weight += n_k / n
+
+            # Adjust if we didn't process all classes
+            if total_weight > 0:
+                h_t_given_y = h_t_given_y / total_weight
+
+            # Mutual information: I(T;Y) = H(T) - H(T|Y)
+            mutual_info[unit_idx] = h_t - h_t_given_y
+
+        return mutual_info
+
+    def cluster_mutual_information(self, mi_values, num_clusters=3):
+        """
+        Cluster units based on their mutual information values
+        and select centroids from each cluster to keep
+        """
+        # Convert MI values to array for clustering
+        mi_items = list(mi_values.items())
+        unit_indices = [item[0] for item in mi_items]
+        mi_array = np.array([item[1] for item in mi_items])
+
+        # Simple clustering based on value ranges
+        sorted_idx = np.argsort(mi_array)
+        cluster_size = len(sorted_idx) // num_clusters
+
+        clusters = []
+        for i in range(num_clusters):
+            start_idx = i * cluster_size
+            end_idx = (i + 1) * cluster_size if i < num_clusters - 1 else len(sorted_idx)
+            cluster_units = [unit_indices[sorted_idx[j]] for j in range(start_idx, end_idx)]
+            clusters.append(cluster_units)
+
+        # Select centroids (units closest to input layer in each cluster)
+        centroids = []
+        for cluster in clusters:
+            if len(cluster) > 0:
+                centroids.append(min(cluster))  # Minimum index is closest to input
+
+        return centroids, clusters
+
+    def prune_units(self, keep_units):
+        """
+        Prune the network to keep only the specified units
+        """
+        self.active_units = set(keep_units)
+        self.logger.info(f"Keeping units: {sorted(self.active_units)}")
+
+        # Create a new model with the pruned structure
+        pruned_model = SimCLR(resnet50, output_dim=128).to(self.device)
+
+        # Copy weights from the current model to the pruned model for retained units
+        orig_state_dict = self.model.state_dict()
+        pruned_state_dict = pruned_model.state_dict()
+
+        for name, param in orig_state_dict.items():
+            if name in pruned_state_dict:
+                # Check if this parameter belongs to a unit we want to keep
+                keep_param = True
+                for unit_idx in range(4):  # ResNet has 4 main layer groups
+                    if unit_idx not in self.active_units and f"encoder.layer{unit_idx}" in name:
+                        keep_param = False
+                        break
+
+                if keep_param:
+                    pruned_state_dict[name] = param
+
+        # Load the pruned state dict
+        pruned_model.load_state_dict(pruned_state_dict, strict=False)
+
+        # Update our model
+        self.model = pruned_model
+
+        # Update optimizer
+        self.optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=1e-4)
+
+        # Update scheduler
+        train_loader, _, _ = self.dataset.get_loaders()
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer,
+            T_max=self.epochs * len(train_loader),
+            eta_min=1e-3
+        )
+
+    def collect_feature_maps(self, data_loader):
+        """
+        Collect feature maps from all units of the network
+        """
+        feature_maps = {}
+        all_labels = []
+
+        # Define hooks to capture intermediate activations
+        activations = {}
+
+        def get_activation(name):
+            def hook(model, input, output):
+                activations[name] = output.detach()
+
+            return hook
+
+        # Register hooks for each layer
+        hooks = []
+
+        # For ResNet, we want to capture the output of each major layer block
+        # These are the high-level layer groups in ResNet
+        hooks.append(self.model.encoder.layer1.register_forward_hook(get_activation(0)))
+        hooks.append(self.model.encoder.layer2.register_forward_hook(get_activation(1)))
+        hooks.append(self.model.encoder.layer3.register_forward_hook(get_activation(2)))
+        hooks.append(self.model.encoder.layer4.register_forward_hook(get_activation(3)))
+
+        self.model.eval()
+        with torch.no_grad():
+            for i, ((x, _), y) in enumerate(data_loader):
+                if i >= 10:  # Limit the number of batches for efficiency
+                    break
+
+                x = x.to(self.device)
+                y = y.to(self.device)
+
+                # Forward pass to collect activations through hooks
+                _ = self.model.encoder(x)
+
+                # Store the feature maps
+                for unit_idx in activations:
+                    if unit_idx not in feature_maps:
+                        feature_maps[unit_idx] = []
+
+                    # Apply global average pooling to make feature dimension consistent
+                    act = activations[unit_idx]
+                    pooled_feature = nn.functional.adaptive_avg_pool2d(act, 1).squeeze(-1).squeeze(-1)
+                    feature_maps[unit_idx].append(pooled_feature)
+
+                all_labels.append(y)
+
+        # Remove hooks
+        for hook in hooks:
+            hook.remove()
+
+        # Convert lists to tensors
+        for unit_idx in feature_maps:
+            feature_maps[unit_idx] = torch.cat(feature_maps[unit_idx], dim=0)
+
+        all_labels = torch.cat(all_labels, dim=0)
+
+        return feature_maps, all_labels
+
+    def train(self, num_pruning_stages=3, pruning_interval=10):
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
         # Early stopping
@@ -236,6 +298,28 @@ class Pruned:
         epoch_bar = tqdm(range(self.epochs), desc="Epochs", position=0)
 
         for epoch in epoch_bar:
+            # Check if it's time to prune
+            if epoch > 0 and epoch % pruning_interval == 0 and len(self.active_units) > num_pruning_stages:
+                # Collect feature maps for pruning decision
+                self.logger.info(f"Collecting feature maps for pruning at epoch {epoch + 1}")
+                feature_maps, labels = self.collect_feature_maps(train_loader)
+
+                # Compute mutual information
+                mi_values = self.compute_mutual_information(feature_maps, labels)
+                self.logger.info(f"Mutual Information values: {mi_values}")
+
+                # Cluster and select units to keep
+                keep_units, clusters = self.cluster_mutual_information(mi_values, num_clusters=3)
+
+                # Prune the network
+                self.prune_units(keep_units)
+
+                # Log pruning information
+                self.logger.info(f"Pruned network at epoch {epoch + 1}, keeping {len(keep_units)} units")
+                self.logger.info(f"Clusters: {clusters}")
+                self.logger.info(
+                    f"Network now has {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} parameters")
+
             self.model.train()
             epoch_loss = 0
             start_time = time.time()
@@ -263,21 +347,7 @@ class Pruned:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Этап обрезки
-            if epoch % 10 == 0 and epoch > 0:
-                mi_values = self.estimate_units_mi(train_loader)
-                keep_indices = self.adaptive_clustering(mi_values)
-                self.prune_units(keep_indices)
-
-                self.logger.info(
-                    f"Stage {self.current_stage}: "
-                    f"Kept {len(keep_indices)} units, "
-                    f"Params: {self.metrics.metrics['params'] / 1e6:.2f}M, "
-                    f"FLOPs: {self.metrics.metrics['flops'] / 1e9:.2f}G"
-                )
-                self.current_stage += 1
-
-            # Валидация
+            # Validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "
@@ -285,7 +355,8 @@ class Pruned:
                 f"GPU Util: {self.metrics.metrics['gpu_utilization_percent'][-1]}%, "
                 f"Training time per epoch: {self.metrics.metrics['training_time_per_epoch_sec'][-1]} sec,"
                 f"Memory usage: {self.metrics.metrics['memory_usage_MB'][-1]} MB,"
-                f"Model size: {self.metrics.metrics["model_size_MB"][-1]} MB")
+                f"Model size: {self.metrics.metrics['model_size_MB'][-1]} MB"
+            )
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss

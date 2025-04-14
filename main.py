@@ -53,22 +53,22 @@ if __name__ == '__main__':
         except e:
             tqdm.write(e)
 
-    if MODEL == "pruned":
-        tqdm.write("Please, provide the number of pruning stages")
-        args = input()
-        if args == "":
-            tqdm.write(
-                f"The parameters are set to default: pruning stages = {PRUNING_STAGES}")
-        else:
-            p = args
-            try:
-                p = int(p)
-                if 0 < p:
-                    PRUNING_STAGES = p
-                else:
-                    tqdm.write("Incorrect number of pruning stages")
-            except e:
-                tqdm.write(e)
+    # if MODEL == "pruned":
+    #     tqdm.write("Please, provide the number of pruning stages")
+    #     args = input()
+    #     if args == "":
+    #         tqdm.write(
+    #             f"The parameters are set to default: pruning stages = {PRUNING_STAGES}")
+    #     else:
+    #         p = args
+    #         try:
+    #             p = int(p)
+    #             if 0 < p:
+    #                 PRUNING_STAGES = p
+    #             else:
+    #                 tqdm.write("Incorrect number of pruning stages")
+    #         except e:
+    #             tqdm.write(e)
 
 
     logger = logging.getLogger("LOGGER")
@@ -91,7 +91,7 @@ if __name__ == '__main__':
     if MODEL == "baseline":
         model = Baseline(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
     elif MODEL == "pruned":
-        model = Pruned(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger, PRUNING_STAGES)
+        model = Pruned(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
 
     logger.info("Model initialized")
     model.train()
