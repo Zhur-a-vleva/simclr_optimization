@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from classes.baseline_model import Baseline
 from classes.pruned_model import Pruned
+from classes.batch_model import DCL
 from dataset.dataset_preparation import Dataset
 
 MODEL = "baseline"
@@ -30,7 +31,7 @@ if __name__ == '__main__':
         b = args[1]
         e = args[2]
 
-        if m in ["baseline", "pruned"]:
+        if m in ["baseline", "pruned", "dcl"]:
             MODEL = m
         else:
             tqdm.write("Incorrect name of the model")
@@ -53,24 +54,6 @@ if __name__ == '__main__':
         except e:
             tqdm.write(e)
 
-    # if MODEL == "pruned":
-    #     tqdm.write("Please, provide the number of pruning stages")
-    #     args = input()
-    #     if args == "":
-    #         tqdm.write(
-    #             f"The parameters are set to default: pruning stages = {PRUNING_STAGES}")
-    #     else:
-    #         p = args
-    #         try:
-    #             p = int(p)
-    #             if 0 < p:
-    #                 PRUNING_STAGES = p
-    #             else:
-    #                 tqdm.write("Incorrect number of pruning stages")
-    #         except e:
-    #             tqdm.write(e)
-
-
     logger = logging.getLogger("LOGGER")
     logger.setLevel(logging.INFO)
     handler = logging.FileHandler(f"log/training_log_{MODEL}.log", mode='w')
@@ -92,6 +75,8 @@ if __name__ == '__main__':
         model = Baseline(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
     elif MODEL == "pruned":
         model = Pruned(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
+    elif MODEL == "dcl":
+        model = DCL(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
 
     logger.info("Model initialized")
     model.train()

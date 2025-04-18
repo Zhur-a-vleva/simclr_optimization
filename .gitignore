@@ -1,6 +1,5 @@
 .idea
-models/baseline
+models
 dataset/data
-models/pruned.zip
 
 

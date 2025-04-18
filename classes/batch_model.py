@@ -4,15 +4,16 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision.models import resnet50
 from tqdm import tqdm
+
 from linear_evaluation.linear_classification import LinearClassification
 from metrics.metrics import Metrics
 from classes.simclr import SimCLR
 
 
-class DCL():
+class DCL:
     def __init__(self, temperature, device, lr, epochs, dataset, logger):
         super().__init__()
-        self.name = "dcl"  # Можно переименовать, чтобы отличать от оригинального
+        self.name = "dcl"
         self.t = temperature
         self.device = device
         self.lr = lr
@@ -24,56 +25,72 @@ class DCL():
         self.metrics = Metrics(self)
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
-
-        # Оптимизатор и планировщик (лукхэн и т.д.)
         self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+
         train_loader, _, _ = dataset.get_loaders()
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=epochs * len(train_loader), eta_min=1e-3
-        )
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs * len(train_loader),
+                                                                    eta_min=1e-3)
 
     def dcl_loss(self, z_i, z_j):
         """
-        Реализация Decoupled Contrastive Learning (DCL) из статьи Yeh et al.
-        Удаляем позитивный член из знаменателя, в отличие от классического InfoNCE.
-
-        Псевдокод:
-            1) Сконкатенируем z_i и z_j вдоль Batch dim => станут 2N в одной матрице.
-            2) Нормируем их (L2-норма).
-            3) Считаем матрицу сходств sim = z @ z^T / t.
-            4) Экспоненциально переходим: exp_sim = exp(sim).
-            5) Обнуляем диагональ (нет self-сходств) и позицию «позитива» (удаляем позитив из знаменателя).
-            6) Считаем сумму по строкам => это знаменатель.
-            7) Для каждого i отдельный positive = exp(sim[i, pos_index[i]]).
-            8) loss_i = -log( positive / denominator ), усредняем.
+        Decoupled Contrastive Learning loss from the paper
+        The key difference from nt_xent_loss is that positive pairs are
+        removed from the denominator of the InfoNCE loss
         """
         N = z_i.size(0)
-        # Формируем единый тензор
-        z = torch.cat([z_i, z_j], dim=0)  # [2N, dim]
-        z = nn.functional.normalize(z, dim=1)
+        z_i = nn.functional.normalize(z_i, dim=1)
+        z_j = nn.functional.normalize(z_j, dim=1)
 
-        # Матрица сходств [2N x 2N]
-        sim = torch.matmul(z, z.T) / self.t
-        exp_sim = torch.exp(sim)
+        # Positive similarity
+        positive_sim = torch.exp(torch.sum(z_i * z_j, dim=1) / self.t)
 
-        # Индекс позитивного примера:
-        # Для i < N -> i+N, для i >= N -> i-N (смещения по батчу)
-        pos_index = torch.arange(2 * N, device=self.device)
-        pos_index[:N] += N
-        pos_index[N:] -= N
+        # All similarity for negatives
+        z = torch.cat((z_i, z_j), dim=0)
+        similarity_matrix = torch.matmul(z_i, z.T) / self.t
 
-        # Убираем вклад «я сам с собой» (диагональ) и «позитив» из знаменателя, чтобы "развязать" позитив/негатив
-        exp_sim.fill_diagonal_(0.)  # diag = 0
-        exp_sim[torch.arange(2 * N), pos_index] = 0.  # исключает позитив из знаменателя
+        # Create mask for negatives
+        mask = torch.ones((N, 2 * N), dtype=bool, device=self.device)
+        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)  # Exclude self
+        mask[range(N), range(N, 2 * N)] = False  # Exclude positive
 
-        # Знаменатель = сумма по строкам
-        denom = exp_sim.sum(dim=1)  # [2N]
+        # Get negative similarities and sum them
+        neg_sim = torch.exp(similarity_matrix) * mask
+        neg_sim_sum = neg_sim.sum(dim=1)
 
-        # Числитель: e^( sim(i, pos_index[i]) )
-        pos_vals = torch.exp(sim[torch.arange(2 * N), pos_index])  # [2N]
+        # Compute DCL loss
+        loss = -torch.log(positive_sim / neg_sim_sum)
+        return loss.mean()
 
-        # Потери
-        loss = -torch.log(pos_vals / denom)
+    def dclw_loss(self, z_i, z_j, sigma=0.5):
+        """
+        Weighted Decoupled Contrastive Learning loss
+        Adds a weighting function to emphasize harder positive pairs
+        """
+        N = z_i.size(0)
+        z_i = nn.functional.normalize(z_i, dim=1)
+        z_j = nn.functional.normalize(z_j, dim=1)
+
+        # Compute positive similarities
+        pos_sim = torch.sum(z_i * z_j, dim=1)
+
+        # Create weights for positive pairs based on their similarity
+        weights = torch.exp(-pos_sim / sigma)
+
+        # All similarity for negatives
+        z = torch.cat((z_i, z_j), dim=0)
+        similarity_matrix = torch.matmul(z_i, z.T) / self.t
+
+        # Create mask for negatives
+        mask = torch.ones((N, 2 * N), dtype=bool, device=self.device)
+        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)  # Exclude self
+        mask[range(N), range(N, 2 * N)] = False  # Exclude positive
+
+        # Get negative similarities and sum them
+        neg_sim = torch.exp(similarity_matrix) * mask
+        neg_sim_sum = neg_sim.sum(dim=1)
+
+        # Compute DCL loss with weights
+        loss = -weights * torch.log(torch.exp(pos_sim / self.t) / neg_sim_sum)
         return loss.mean()
 
     def validate(self, val_loader):
@@ -84,12 +101,12 @@ class DCL():
                 x_i, x_j = x_i.to(self.device), x_j.to(self.device)
                 _, z_i = self.model(x_i)
                 _, z_j = self.model(x_j)
-                # Заменяем на dcl_loss
                 loss = self.dcl_loss(z_i, z_j)
                 val_loss += loss.item()
+
         return val_loss / len(val_loader)
 
-    def train(self):
+    def train(self, use_weighted=False):
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
         # Early stopping
@@ -114,14 +131,17 @@ class DCL():
                 _, z_i = self.model(x_i)
                 _, z_j = self.model(x_j)
 
-                # === Используем dcl_loss вместо InfoNCE ===
-                loss = self.dcl_loss(z_i, z_j)
+                if use_weighted:
+                    loss = self.dclw_loss(z_i, z_j)
+                else:
+                    loss = self.dcl_loss(z_i, z_j)
+
                 loss.backward()
                 self.optimizer.step()
                 self.scheduler.step()
                 epoch_loss += loss.item()
 
-            # Метрики
+            # save metrics
             training_time = time.time() - start_time
             self.metrics.metrics["contrastive_loss"].append(epoch_loss / len(train_loader))
             self.metrics.metrics["training_time_per_epoch_sec"].append(training_time)
@@ -132,13 +152,12 @@ class DCL():
             # Валидация
             val_loss = self.validate(val_loader)
             self.logger.info(
-                f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader):.4f}, "
-                f"Validation Loss: {val_loss:.4f}, "
+                f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "
+                f"Validation Loss: {val_loss}, "
                 f"GPU Util: {self.metrics.metrics['gpu_utilization_percent'][-1]}%, "
-                f"Training time per epoch: {self.metrics.metrics['training_time_per_epoch_sec'][-1]:.2f} sec, "
-                f"Memory usage: {self.metrics.metrics['memory_usage_MB'][-1]} MB, "
-                f"Model size: {self.metrics.metrics['model_size_MB'][-1]} MB"
-            )
+                f"Training time per epoch: {self.metrics.metrics['training_time_per_epoch_sec'][-1]} sec,"
+                f"Memory usage: {self.metrics.metrics['memory_usage_MB'][-1]} MB,"
+                f"Model size: {self.metrics.metrics['model_size_MB'][-1]} MB")
 
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -148,7 +167,7 @@ class DCL():
             else:
                 early_stopping_counter += 1
 
-            # Рано останавливаемся
+            # check early stopping condition
             if early_stopping_counter >= early_stopping_patience:
                 self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
                 break
@@ -168,3 +187,19 @@ class DCL():
         self.best_model.load_state_dict(torch.load(f"models/{self.name}"))
         self.linear_classification = LinearClassification(self)
         self.metrics.set_linear_classification(self.linear_classification)
+
+
+class DCLW(DCL):
+    """
+    Weighted Decoupled Contrastive Learning implementation
+    Inherits from DCL but uses the weighted loss by default
+    """
+
+    def __init__(self, temperature, device, lr, epochs, dataset, logger, sigma=0.5):
+        super().__init__(temperature, device, lr, epochs, dataset, logger)
+        self.name = "dclw"
+        self.sigma = sigma  # Parameter for weighting function
+
+    def train(self):
+        # Call parent's train with weighted=True
+        super().train(use_weighted=True)
