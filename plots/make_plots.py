@@ -1,195 +1,229 @@
 import os
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import seaborn as sns
+import json
 
 # Создаем директорию для сохранения графиков, если она не существует
-this_dir = os.path.dirname(os.path.abspath(__file__))
-output_dir = this_dir
 
-# Предположим, что у нас есть доступ к метрикам обеих моделей после их обучения
-# baseline_metrics и pruned_metrics - это словари с результатами обучения
+# Create plots directory if it doesn't exist
+os.makedirs('plots', exist_ok=True)
 
-def create_comparison_plots(baseline_metrics, pruned_metrics):
-    """
-    Создает и сохраняет графики сравнения метрик для двух моделей
+# Define file paths and model names
+file_paths = [
+    os.path.join("..", 'metrics/metrics_baseline.json'),
+    os.path.join("..", "metrics/metrics_dcl.json"),
+    os.path.join("..", 'metrics/metrics_dynamic_sparse.json'),
+    os.path.join("..", 'metrics/metrics_pruned.json')
+]
+model_names = ['Baseline', 'DCL', 'Dynamic Sparse', 'Pruned']
 
-    Args:
-        baseline_metrics (dict): Метрики базовой модели
-        pruned_metrics (dict): Метрики модели с прунингом
-    """
+# Load metrics data
+metrics_data = {}
+for file_path, model_name in zip(file_paths, model_names):
+    try:
+        with open(file_path, 'r') as f:
+            metrics_data[model_name] = json.load(f)
+    except FileNotFoundError:
+        print(f"Warning: {file_path} not found!")
+        metrics_data[model_name] = {}
 
-    # 1. График обучающей функции потерь
-    plt.figure(figsize=(12, 6))
-    plt.plot(baseline_metrics["contrastive_loss"], label="Baseline Model")
-    plt.plot(pruned_metrics["contrastive_loss"], label="Pruned Model")
-    plt.xlabel("Epoch")
-    plt.ylabel("Contrastive Loss")
-    plt.title("Training Loss Comparison")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.savefig(f"{output_dir}/training_loss_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# Set up a consistent color scheme
+colors = ['blue', 'green', 'red', 'purple']
+plt.style.use('seaborn-v0_8-darkgrid')
 
-    # 2. График времени обучения на эпоху
-    plt.figure(figsize=(12, 6))
-    plt.plot(baseline_metrics["training_time_per_epoch_sec"], label="Baseline Model")
-    plt.plot(pruned_metrics["training_time_per_epoch_sec"], label="Pruned Model")
-    plt.xlabel("Epoch")
-    plt.ylabel("Training Time (seconds)")
-    plt.title("Training Time per Epoch Comparison")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.savefig(f"{output_dir}/training_time_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# 1. Loss function plot
+plt.figure(figsize=(10, 6))
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'contrastive_loss' in data:
+        plt.plot(data['contrastive_loss'], label=model_name, color=colors[i])
+plt.xlabel('Epoch')
+plt.ylabel('Contrastive Loss')
+plt.title('Training Loss Comparison')
+plt.legend()
+plt.tight_layout()
+plt.savefig('plots/contrastive_loss.png', dpi=300)
+plt.close()
 
-    # 3. График использования GPU
-    plt.figure(figsize=(12, 6))
-    plt.plot(baseline_metrics["gpu_utilization_percent"], label="Baseline Model")
-    plt.plot(pruned_metrics["gpu_utilization_percent"], label="Pruned Model")
-    plt.xlabel("Epoch")
-    plt.ylabel("GPU Utilization (%)")
-    plt.title("GPU Utilization Comparison")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.savefig(f"{output_dir}/gpu_utilization_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# 2. Training time per epoch
+plt.figure(figsize=(10, 6))
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'training_time_per_epoch_sec' in data:
+        plt.plot(data['training_time_per_epoch_sec'], label=model_name, color=colors[i])
+plt.xlabel('Epoch')
+plt.ylabel('Training Time (seconds)')
+plt.title('Training Time per Epoch')
+plt.legend()
+plt.tight_layout()
+plt.savefig('plots/training_time.png', dpi=300)
+plt.close()
 
-    # 4. График использования памяти
-    plt.figure(figsize=(12, 6))
-    plt.plot(baseline_metrics["memory_usage_MB"], label="Baseline Model")
-    plt.plot(pruned_metrics["memory_usage_MB"], label="Pruned Model")
-    plt.xlabel("Epoch")
-    plt.ylabel("Memory Usage (MB)")
-    plt.title("Memory Usage Comparison")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.savefig(f"{output_dir}/memory_usage_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# 3. Average training time per epoch (bar chart)
+plt.figure(figsize=(10, 6))
+avg_times = []
+for model_name, data in metrics_data.items():
+    if 'training_time_per_epoch_sec' in data:
+        avg_times.append(np.mean(data['training_time_per_epoch_sec']))
+    else:
+        avg_times.append(0)
 
-    # 5. График размера модели
-    plt.figure(figsize=(12, 6))
-    plt.plot(baseline_metrics["model_size_MB"], label="Baseline Model")
-    plt.plot(pruned_metrics["model_size_MB"], label="Pruned Model")
-    plt.xlabel("Epoch")
-    plt.ylabel("Model Size (MB)")
-    plt.title("Model Size Comparison")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.7)
-    plt.savefig(f"{output_dir}/model_size_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+sns.barplot(x=model_names, y=avg_times, palette=colors)
+plt.xlabel('Model')
+plt.ylabel('Average Training Time (seconds)')
+plt.title('Average Training Time per Epoch')
+plt.tight_layout()
+plt.savefig('plots/avg_training_time.png', dpi=300)
+plt.close()
 
-    # 6. Сводная статистика на последней эпохе (барчарт)
-    metrics_names = ["Final Loss", "Training Time (s)", "GPU Util (%)", "Memory (MB)", "Model Size (MB)"]
-    baseline_values = [
-        baseline_metrics["contrastive_loss"][-1],
-        baseline_metrics["training_time_per_epoch_sec"][-1],
-        baseline_metrics["gpu_utilization_percent"][-1],
-        baseline_metrics["memory_usage_MB"][-1],
-        baseline_metrics["model_size_MB"][-1]
-    ]
-    pruned_values = [
-        pruned_metrics["contrastive_loss"][-1],
-        pruned_metrics["training_time_per_epoch_sec"][-1],
-        pruned_metrics["gpu_utilization_percent"][-1],
-        pruned_metrics["memory_usage_MB"][-1],
-        pruned_metrics["model_size_MB"][-1]
-    ]
+# 4. Training time comparison: first 50 vs last 50 epochs
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # Создаем DataFrame для удобства построения
-    df = pd.DataFrame({
-        'Metric': metrics_names * 2,
-        'Value': baseline_values + pruned_values,
-        'Model': ['Baseline'] * 5 + ['Pruned'] * 5
-    })
-
-    plt.figure(figsize=(14, 8))
-    sns.barplot(x='Metric', y='Value', hue='Model', data=df)
-    plt.title("Final Metrics Comparison")
-    plt.xticks(rotation=30)
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/final_metrics_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
-
-    # 7. График относительного улучшения для каждой метрики
-    improvement_percentages = []
-    for i in range(len(metrics_names)):
-        if metrics_names[i] == "Final Loss":
-            # Для функции потерь, меньше - лучше
-            improv = (baseline_values[i] - pruned_values[i]) / (baseline_values[i] * 100 + 1)
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'training_time_per_epoch_sec' in data:
+        times = data['training_time_per_epoch_sec']
+        if len(times) >= 50:
+            # First 50 epochs
+            ax1.plot(times[:50], label=model_name, color=colors[i])
+            # Last 50 epochs
+            ax2.plot(range(len(times)-50, len(times)), times[-50:], label=model_name, color=colors[i])
         else:
-            # Для остальных метрик (время, память, размер), меньше - лучше
-            improv = (baseline_values[i] - pruned_values[i]) / (baseline_values[i] * 100 + 1)
-        improvement_percentages.append(improv)
+            # If we have less than 50 epochs, use all available data
+            ax1.plot(times, label=model_name, color=colors[i])
+            ax2.plot([], [], label=model_name, color=colors[i])  # Empty plot for consistency
 
-    plt.figure(figsize=(12, 6))
-    bars = plt.bar(metrics_names, improvement_percentages, color='skyblue')
+ax1.set_xlabel('Epoch')
+ax1.set_ylabel('Training Time (seconds)')
+ax1.set_title('First 50 Epochs')
+ax1.legend()
 
-    # Раскрашиваем отрицательные значения красным
-    for i, bar in enumerate(bars):
-        if improvement_percentages[i] < 0:
-            bar.set_color('salmon')
+ax2.set_xlabel('Epoch')
+ax2.set_ylabel('Training Time (seconds)')
+ax2.set_title('Last 50 Epochs')
+ax2.legend()
 
-    plt.axhline(y=0, color='k', linestyle='-', alpha=0.3)
-    plt.ylabel("Improvement (%)")
-    plt.title("Relative Improvement of Pruned Model")
-    plt.xticks(rotation=30)
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig('plots/training_time_comparison.png', dpi=300)
+plt.close()
 
-    # Добавляем метки значений над столбцами
-    for i, v in enumerate(improvement_percentages):
-        plt.text(i, v + (5 if v >= 0 else -5),
-                 f"{v:.1f}%",
-                 ha='center',
-                 va='bottom' if v >= 0 else 'top',
-                 fontweight='bold')
+# 5. GPU utilization
+plt.figure(figsize=(10, 6))
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'gpu_utilization_percent' in data:
+        plt.plot(data['gpu_utilization_percent'], label=model_name, color=colors[i])
+plt.xlabel('Epoch')
+plt.ylabel('GPU Utilization (%)')
+plt.title('GPU Utilization per Epoch')
+plt.legend()
+plt.tight_layout()
+plt.savefig('plots/gpu_utilization.png', dpi=300)
+plt.close()
 
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/relative_improvement.png", dpi=300, bbox_inches="tight")
-    plt.close()
+# 6. Average GPU utilization (bar chart)
+plt.figure(figsize=(10, 6))
+avg_gpu = []
+for model_name, data in metrics_data.items():
+    if 'gpu_utilization_percent' in data:
+        avg_gpu.append(np.mean(data['gpu_utilization_percent']))
+    else:
+        avg_gpu.append(0)
 
-    # 8. График сравнения эффективности (соотношение качество/ресурсы)
-    # Определяем эффективность как отношение обратной величины потерь к использованию ресурсов
-    baseline_efficiency = 1 / (baseline_values[0] * baseline_values[4])  # 1/(loss * model_size)
-    pruned_efficiency = 1 / (pruned_values[0] * pruned_values[4])  # 1/(loss * model_size)
+sns.barplot(x=model_names, y=avg_gpu, palette=colors)
+plt.xlabel('Model')
+plt.ylabel('Average GPU Utilization (%)')
+plt.title('Average GPU Utilization')
+plt.tight_layout()
+plt.savefig('plots/avg_gpu_utilization.png', dpi=300)
+plt.close()
 
-    plt.figure(figsize=(10, 6))
-    plt.bar(['Baseline Model', 'Pruned Model'], [baseline_efficiency, pruned_efficiency], color=['blue', 'green'])
-    plt.ylabel('Efficiency (1 / (Loss * Model Size))')
-    plt.title('Model Efficiency Comparison')
+# 7. GPU utilization comparison: first 50 vs last 50 epochs
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
-    # Добавляем метки значений
-    for i, v in enumerate([baseline_efficiency, pruned_efficiency]):
-        plt.text(i, v / 2, f"{v:.2e}", ha='center', color='white', fontweight='bold')
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'gpu_utilization_percent' in data:
+        gpu_util = data['gpu_utilization_percent']
+        if len(gpu_util) >= 50:
+            # First 50 epochs
+            ax1.plot(gpu_util[:50], label=model_name, color=colors[i])
+            # Last 50 epochs
+            ax2.plot(range(len(gpu_util)-50, len(gpu_util)), gpu_util[-50:], label=model_name, color=colors[i])
+        else:
+            # If we have less than 50 epochs, use all available data
+            ax1.plot(gpu_util, label=model_name, color=colors[i])
+            ax2.plot([], [], label=model_name, color=colors[i])  # Empty plot for consistency
 
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    plt.savefig(f"{output_dir}/efficiency_comparison.png", dpi=300, bbox_inches="tight")
-    plt.close()
+ax1.set_xlabel('Epoch')
+ax1.set_ylabel('GPU Utilization (%)')
+ax1.set_title('First 50 Epochs')
+ax1.legend()
 
+ax2.set_xlabel('Epoch')
+ax2.set_ylabel('GPU Utilization (%)')
+ax2.set_title('Last 50 Epochs')
+ax2.legend()
 
-# Функция для загрузки метрик, если они сохранены в файлы
-def load_metrics_from_files(baseline_file, pruned_file):
-    import json
+plt.tight_layout()
+plt.savefig('plots/gpu_utilization_comparison.png', dpi=300)
+plt.close()
 
-    with open(baseline_file, 'r') as f:
-        baseline_metrics = json.load(f)
+# 8. Memory usage
+plt.figure(figsize=(10, 6))
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'memory_usage_MB' in data:
+        plt.plot(data['memory_usage_MB'], label=model_name, color=colors[i])
+plt.xlabel('Epoch')
+plt.ylabel('Memory Usage (MB)')
+plt.title('Memory Usage per Epoch')
+plt.legend()
+plt.tight_layout()
+plt.savefig('plots/memory_usage.png', dpi=300)
+plt.close()
 
-    with open(pruned_file, 'r') as f:
-        pruned_metrics = json.load(f)
+# 9. Model size
+plt.figure(figsize=(10, 6))
+for i, (model_name, data) in enumerate(metrics_data.items()):
+    if 'model_size_MB' in data:
+        plt.plot(data['model_size_MB'], label=model_name, color=colors[i])
+plt.xlabel('Epoch')
+plt.ylabel('Model Size (MB)')
+plt.title('Model Size per Epoch')
+plt.legend()
+plt.tight_layout()
+plt.savefig('plots/model_size.png', dpi=300)
+plt.close()
 
-    return baseline_metrics, pruned_metrics
+# 10. Final accuracy metrics (bar charts)
+# Linear evaluation accuracy
+plt.figure(figsize=(10, 6))
+final_accuracy = []
+for model_name, data in metrics_data.items():
+    if 'linear_evaluation_accuracy' in data and data['linear_evaluation_accuracy']:
+        final_accuracy.append(data['linear_evaluation_accuracy'][-1])
+    else:
+        final_accuracy.append(0)
 
+sns.barplot(x=model_names, y=final_accuracy, palette=colors)
+plt.xlabel('Model')
+plt.ylabel('Linear Evaluation Accuracy')
+plt.title('Final Linear Evaluation Accuracy')
+plt.tight_layout()
+plt.savefig('plots/final_accuracy.png', dpi=300)
+plt.close()
 
+# NMI
+plt.figure(figsize=(10, 6))
+final_nmi = []
+for model_name, data in metrics_data.items():
+    if 'nmi' in data and data['nmi']:
+        final_nmi.append(data['nmi'][-1])
+    else:
+        final_nmi.append(0)
 
-# Если метрики доступны в виде экземпляров класса Metrics
-def create_plots_from_metrics_objects(baseline_metrics_obj, pruned_metrics_obj):
-    baseline_metrics = baseline_metrics_obj.metrics
-    pruned_metrics = pruned_metrics_obj.metrics
-    create_comparison_plots(baseline_metrics, pruned_metrics)
+sns.barplot(x=model_names, y=final_nmi, palette=colors)
+plt.xlabel('Model')
+plt.ylabel('NMI')
+plt.title('Final Normalized Mutual Information (NMI)')
+plt.tight_layout()
+plt.savefig('plots/final_nmi.png', dpi=300)
+plt.close()
 
-
-if __name__ == "__main__":
-    baseline_metrics, pruned_metrics = load_metrics_from_files(os.path.join("..", "metrics/metrics_dcl.json"),
-                                                               os.path.join("..", "metrics/metrics_pruned.json"))
-    create_comparison_plots(baseline_metrics, pruned_metrics)
+print("All plots have been saved to the 'plots' directory.")

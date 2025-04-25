@@ -8,6 +8,7 @@ from tqdm import tqdm
 from classes.baseline_model import Baseline
 from classes.pruned_model import Pruned
 from classes.batch_model import DCL
+from classes.dynamic_sparse_model import DynamicSparse
 from dataset.dataset_preparation import Dataset
 
 MODEL = "baseline"
@@ -31,7 +32,7 @@ if __name__ == '__main__':
         b = args[1]
         e = args[2]
 
-        if m in ["baseline", "pruned", "dcl"]:
+        if m in ["baseline", "pruned", "dcl", "dynamic_sparse"]:
             MODEL = m
         else:
             tqdm.write("Incorrect name of the model")
@@ -77,6 +78,8 @@ if __name__ == '__main__':
         model = Pruned(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
     elif MODEL == "dcl":
         model = DCL(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
+    elif MODEL == "dynamic_sparse":
+        model = DynamicSparse(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
 
     logger.info("Model initialized")
     model.train()
