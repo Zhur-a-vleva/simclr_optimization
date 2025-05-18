@@ -6,6 +6,7 @@ import torch
 from tqdm import tqdm
 
 from classes.baseline_model import Baseline
+from classes.schedule_free_model import ScheduleFreeSimCLR
 from classes.pruned_model import Pruned
 from classes.batch_model import DCL
 from classes.dynamic_sparse_model import DynamicSparse
@@ -32,7 +33,7 @@ if __name__ == '__main__':
         b = args[1]
         e = args[2]
 
-        if m in ["baseline", "pruned", "dcl", "dynamic_sparse"]:
+        if m in ["baseline", "pruned", "dcl", "dynamic_sparse", "schedule_free_simclr"]:
             MODEL = m
         else:
             tqdm.write("Incorrect name of the model")
@@ -80,6 +81,8 @@ if __name__ == '__main__':
         model = DCL(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
     elif MODEL == "dynamic_sparse":
         model = DynamicSparse(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
+    elif MODEL == "schedule_free_simclr":
+        model = ScheduleFreeSimCLR(TEMPERATURE, DEVICE, LEARNING_RATE, EPOCHS, dataset, logger)
 
     logger.info("Model initialized")
     model.train()
