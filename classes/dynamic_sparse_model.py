@@ -19,65 +19,55 @@ class DynamicSparse:
         self.device = device
         self.lr = lr
         self.epochs = epochs
-
-        # Initialize model
         self.model = SimCLR(resnet50, output_dim=128).to(device)
         self.best_model = self.model
-
-        # Dataset and evaluation objects
         self.dataset = dataset
         self.linear_classification = None
         self.metrics = Metrics(self)
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
 
-        # Dynamic sparse parameters
-        self.sparsity = sparsity  # Target global sparsity
-        self.reallocation_interval = reallocation_interval  # How often to reallocate parameters
-        self.prune_rate = prune_rate  # Percentage of remaining weights to prune each time
+        # dynamic sparse parameters
+        self.sparsity = sparsity  # target global sparsity
+        self.reallocation_interval = reallocation_interval  # how often to reallocate parameters
+        self.prune_rate = prune_rate  # percentage of remaining weights to prune each time
 
-        # Initialize sparse masks for all applicable parameter tensors
+        # initialize sparse masks for all applicable parameter tensors
         self.masks = {}
         self.initialize_sparse_masks()
 
-        # Set up optimizer
         self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
-
-        # Set up scheduler
         train_loader, _, _ = dataset.get_loaders()
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer, T_max=epochs * len(train_loader), eta_min=1e-3
         )
 
-        # Initialize step counter for parameter reallocation
+        # initialize step counter for parameter reallocation
         self.steps = 0
 
     def initialize_sparse_masks(self):
         """Initialize sparse masks for convolutional layers"""
         for name, param in self.model.named_parameters():
-            # Skip the first layer, normalization parameters, and biases
-            if (len(param.shape) <= 1 or  # Skip biases and BN params
-                    "encoder.conv1" in name or  # Skip first layer
-                    "encoder.fc" in name or  # Skip FC layer
-                    "encoder.bn" in name):  # Skip BN layers
+            # skip the first layer, normalization parameters, and biases
+            if (len(param.shape) <= 1 or
+                    "encoder.conv1" in name or
+                    "encoder.fc" in name or
+                    "encoder.bn" in name):
                 continue
 
-            # Create a binary mask initialized with 1s where weights are kept
+            # create a binary mask initialized with 1s where weights are kept
             mask = torch.zeros_like(param, dtype=torch.bool, device=self.device)
 
-            # Randomly select indices to keep based on sparsity
+            # randomly select indices to keep based on sparsity
             n_weights = param.numel()
             n_keep = int(n_weights * (1 - self.sparsity))
 
-            # Flatten, set random elements to 1, and reshape back
+            # flatten, set random elements to 1, and reshape back
             flat_mask = mask.view(-1)
             indices = torch.randperm(n_weights, device=self.device)[:n_keep]
             flat_mask[indices] = True
 
-            # Store the mask
             self.masks[name] = mask
-
-            # Apply the mask to the parameter
             param.data = param.data * mask
 
     def apply_masks(self):
@@ -88,39 +78,39 @@ class DynamicSparse:
 
     def reallocate_parameters(self):
         """Dynamic sparse parameter reallocation based on magnitude and gradients"""
-        # Step 1: Count total parameters for reallocation
+        # count total parameters for reallocation
         total_params = 0
         total_zeros = 0
         param_values = {}
 
         for name, param in self.model.named_parameters():
             if name in self.masks:
-                # Count non-zero parameters
+                # count non-zero parameters
                 non_zeros = self.masks[name].sum().item()
                 total_params += non_zeros
                 total_zeros += param.numel() - non_zeros
 
-                # Store parameter values for later use
+                # store parameter values for later use
                 param_values[name] = param.data.clone()
 
-        # Calculate number of parameters to prune and regrow
+        # calculate number of parameters to prune and regrow
         to_prune = int(total_params * self.prune_rate)
 
-        # Step 2: Identify parameters to prune (smallest magnitude)
+        # identify parameters to prune (smallest magnitude)
         all_values = []
         for name, param in self.model.named_parameters():
             if name in self.masks:
-                # Get non-zero parameter values
+                # get non-zero parameter values
                 values = param.data[self.masks[name]]
                 values_with_meta = [(name, i, v.abs().item())
                                     for i, v in enumerate(values)]
                 all_values.extend(values_with_meta)
 
-        # Sort by magnitude and select smallest
+        # sort by magnitude and select smallest
         all_values.sort(key=lambda x: x[2])
         to_prune_values = all_values[:to_prune]
 
-        # Step 3: Prune selected parameters
+        # prune selected parameters
         indices_to_prune = {}
         for name, idx, _ in to_prune_values:
             if name not in indices_to_prune:
@@ -128,48 +118,44 @@ class DynamicSparse:
             indices_to_prune[name].append(idx)
 
         for name, indices in indices_to_prune.items():
-            # Convert flat indices to mask indices
+            # convert flat indices to mask indices
             flat_mask = self.masks[name].view(-1)
             non_zero_indices = flat_mask.nonzero().view(-1)
 
-            # Prune selected indices
+            # prune selected indices
             for idx in indices:
                 flat_mask[non_zero_indices[idx]] = False
 
-            # Apply updated mask
             self.masks[name] = flat_mask.view_as(self.masks[name])
 
-        # Step 4: Calculate layer scores for parameter growth
-        # Heuristic: layers with larger fractions of non-zero weights get more parameters
+        # calculate layer scores for parameter growth
+        # layers with larger fractions of non-zero weights get more parameters
         layer_scores = {}
         for name, mask in self.masks.items():
             non_zero_ratio = mask.sum().float() / mask.numel()
             layer_scores[name] = non_zero_ratio
 
-        # Normalize scores
         total_score = sum(layer_scores.values())
         if total_score > 0:
             layer_scores = {k: v / total_score for k, v in layer_scores.items()}
 
-        # Step 5: Redistribute pruned parameters
+        # redistribute pruned parameters
         for name, score in layer_scores.items():
-            # Calculate how many parameters to add to this layer
+            # calculate how many parameters to add to this layer
             to_grow = int(to_prune * score)
 
-            # Find zero positions in the mask
+            # find zero positions in the mask
             flat_mask = self.masks[name].view(-1)
             zero_indices = (~flat_mask).nonzero().view(-1)
 
             if len(zero_indices) > 0 and to_grow > 0:
-                # Select random positions to grow
+                # select random positions to grow
                 n_to_grow = min(to_grow, len(zero_indices))
                 grow_indices = zero_indices[torch.randperm(len(zero_indices))[:n_to_grow]]
 
-                # Update mask
                 flat_mask[grow_indices] = True
                 self.masks[name] = flat_mask.view_as(self.masks[name])
 
-        # Step 6: Apply updated masks to parameters
         self.apply_masks()
 
     def nt_xent_loss(self, z_i, z_j):
@@ -203,7 +189,7 @@ class DynamicSparse:
         """Train the model with dynamic sparse reparameterization"""
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
-        # Early stopping
+        # early stopping
         early_stopping_patience = 100
         best_val_loss = float('inf')
         early_stopping_counter = 0
@@ -227,16 +213,16 @@ class DynamicSparse:
                 loss = self.nt_xent_loss(z_i, z_j)
                 loss.backward()
 
-                # Apply masks before optimizer step to ensure zero weights stay zero
+                # apply masks before optimizer step to ensure zero weights stay zero
                 self.apply_masks()
 
                 self.optimizer.step()
                 self.scheduler.step()
 
-                # Ensure sparsity is maintained
+                # ensure sparsity is maintained
                 self.apply_masks()
 
-                # Check if it's time to reallocate parameters
+                # check if it's time to reallocate parameters
                 self.steps += 1
                 if self.steps % self.reallocation_interval == 0:
                     self.reallocate_parameters()
@@ -251,7 +237,7 @@ class DynamicSparse:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Validation
+            # validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "

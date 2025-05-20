@@ -30,3 +30,7 @@ python main.py baseline 256 501
 
 ### Model names:
 - baseline
+- pruned
+- dcl
+- dynamic_sparse
+- schedule_free_simclr

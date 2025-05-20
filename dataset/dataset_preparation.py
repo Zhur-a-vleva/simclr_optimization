@@ -47,8 +47,10 @@ class Dataset:
 
         train_loader = DataLoader(train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers,
                                   drop_last=True, pin_memory=True)
-        val_loader = DataLoader(val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
-        test_loader = DataLoader(test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, pin_memory=True)
+        val_loader = DataLoader(val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers,
+                                pin_memory=True)
+        test_loader = DataLoader(test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers,
+                                 pin_memory=True)
 
         self.train, self.val, self.test = train, val, test
         self.train_loader, self.val_loader, self.test_loader = train_loader, val_loader, test_loader

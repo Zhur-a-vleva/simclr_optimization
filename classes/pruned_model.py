@@ -31,7 +31,7 @@ class Pruned:
         train_loader, _, _ = dataset.get_loaders()
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=epochs * len(train_loader),
                                                                     eta_min=1e-3)
-        # Keep track of feature maps and their information content
+        # keep track of feature maps and their information content
         self.feature_maps = {}
         self.mutual_info = {}
         self.active_units = set(range(len(self.model.encoder._modules)))
@@ -61,7 +61,8 @@ class Pruned:
 
         return val_loss / len(val_loader)
 
-    def compute_mutual_information(self, feature_maps, labels):
+    @staticmethod
+    def compute_mutual_information(feature_maps, labels):
         """
         Compute mutual information between feature maps and output labels
         using Gaussian Mixture Model approximation with improved numerical stability.
@@ -69,10 +70,10 @@ class Pruned:
         mutual_info = {}
 
         for unit_idx, features in feature_maps.items():
-            # Flatten features to vectors
+            # flatten features to vectors
             features = features.reshape(features.size(0), -1)
 
-            # Separate features by class
+            # separate features by class
             class_features = {}
             for i in range(len(labels)):
                 label = labels[i].item()
@@ -80,90 +81,88 @@ class Pruned:
                     class_features[label] = []
                 class_features[label].append(features[i])
 
-            # Calculate means for each class
+            # calculate means for each class
             class_means = {}
             for label, feats in class_features.items():
                 class_means[label] = torch.stack(feats).mean(dim=0)
 
-            # Estimate sigma for GMM - using a more robust approach
-            # Use the average pairwise distance as a basis for sigma
+            # estimate sigma for GMM - using a more robust approach
+            # use the average pairwise distance as a basis for sigma
             total_dist = 0.0
             count = 0
-            for i in range(min(100, len(features))):  # Sample to avoid O(n²) complexity
+            for i in range(min(100, len(features))):  # sample to avoid O(n²) complexity
                 for j in range(i + 1, min(100, len(features))):
                     dist = torch.sum((features[i] - features[j]) ** 2).item()
                     total_dist += dist
                     count += 1
 
-            # Set sigma based on average distance (avoid division by zero)
+            # set sigma based on average distance (avoid division by zero)
             sigma = np.sqrt(total_dist / max(1, count)) + 1e-8
 
-            # Upper bound on mutual information
-            num_classes = len(class_means)
+            # upper bound on mutual information
             n = len(labels)
 
-            # Calculate first term: H(T) with numerical stability
+            # calculate first term: H(T) with numerical stability
             h_t = 0
-            for i in range(min(100, n)):  # Sample to reduce computation
+            for i in range(min(100, n)):  # sample to reduce computation
                 for j in range(min(100, n)):
                     if i != j:  # Skip self-comparisons
                         dist_sq = torch.sum((features[i] - features[j]) ** 2).item()
-                        # Use a numerically stable approach
+                        # use a numerically stable approach
                         h_t += -dist_sq / (2 * sigma ** 2)  # log space calculation
 
-            # Normalize properly
             sample_size = min(100, n)
             h_t = h_t / (sample_size * (sample_size - 1)) if sample_size > 1 else 0
 
-            # Calculate second term: H(T|Y) with numerical stability
+            # calculate second term: H(T|Y) with numerical stability
             h_t_given_y = 0
             total_weight = 0
 
             for label, feats in class_features.items():
                 n_k = len(feats)
-                if n_k <= 1:  # Skip classes with only one sample
+                if n_k <= 1:  # skip classes with only one sample
                     continue
 
                 class_sum = 0
                 feats_tensor = torch.stack(feats)
 
-                # Sample if there are too many features in this class
+                # sample if there are too many features in this class
                 sample_size_k = min(100, n_k)
                 indices = torch.randperm(n_k)[:sample_size_k]
                 feats_tensor = feats_tensor[indices]
 
                 for i in range(sample_size_k):
                     for j in range(sample_size_k):
-                        if i != j:  # Skip self-comparisons
+                        if i != j:  # skip self-comparisons
                             dist_sq = torch.sum((feats_tensor[i] - feats_tensor[j]) ** 2).item()
-                            # Use a numerically stable approach
+                            # use a numerically stable approach
                             class_sum += -dist_sq / (4 * sigma ** 2)  # log space calculation
 
-                # Normalize properly
                 norm_class_sum = class_sum / (sample_size_k * (sample_size_k - 1)) if sample_size_k > 1 else 0
                 h_t_given_y += (n_k / n) * norm_class_sum
                 total_weight += n_k / n
 
-            # Adjust if we didn't process all classes
+            # adjust if we didn't process all classes
             if total_weight > 0:
                 h_t_given_y = h_t_given_y / total_weight
 
-            # Mutual information: I(T;Y) = H(T) - H(T|Y)
+            # mutual information: I(T;Y) = H(T) - H(T|Y)
             mutual_info[unit_idx] = h_t - h_t_given_y
 
         return mutual_info
 
-    def cluster_mutual_information(self, mi_values, num_clusters=3):
+    @staticmethod
+    def cluster_mutual_information(mi_values, num_clusters=3):
         """
         Cluster units based on their mutual information values
         and select centroids from each cluster to keep
         """
-        # Convert MI values to array for clustering
+        # convert MI values to array for clustering
         mi_items = list(mi_values.items())
         unit_indices = [item[0] for item in mi_items]
         mi_array = np.array([item[1] for item in mi_items])
 
-        # Simple clustering based on value ranges
+        # simple clustering based on value ranges
         sorted_idx = np.argsort(mi_array)
         cluster_size = len(sorted_idx) // num_clusters
 
@@ -174,11 +173,11 @@ class Pruned:
             cluster_units = [unit_indices[sorted_idx[j]] for j in range(start_idx, end_idx)]
             clusters.append(cluster_units)
 
-        # Select centroids (units closest to input layer in each cluster)
+        # select centroids (units closest to input layer in each cluster)
         centroids = []
         for cluster in clusters:
             if len(cluster) > 0:
-                centroids.append(min(cluster))  # Minimum index is closest to input
+                centroids.append(min(cluster))
 
         return centroids, clusters
 
@@ -189,16 +188,13 @@ class Pruned:
         self.active_units = set(keep_units)
         self.logger.info(f"Keeping units: {sorted(self.active_units)}")
 
-        # Create a new model with the pruned structure
         pruned_model = SimCLR(resnet50, output_dim=128).to(self.device)
 
-        # Copy weights from the current model to the pruned model for retained units
         orig_state_dict = self.model.state_dict()
         pruned_state_dict = pruned_model.state_dict()
 
         for name, param in orig_state_dict.items():
             if name in pruned_state_dict:
-                # Check if this parameter belongs to a unit we want to keep
                 keep_param = True
                 for unit_idx in range(4):  # ResNet has 4 main layer groups
                     if unit_idx not in self.active_units and f"encoder.layer{unit_idx}" in name:
@@ -208,16 +204,9 @@ class Pruned:
                 if keep_param:
                     pruned_state_dict[name] = param
 
-        # Load the pruned state dict
         pruned_model.load_state_dict(pruned_state_dict, strict=False)
-
-        # Update our model
         self.model = pruned_model
-
-        # Update optimizer
         self.optimizer = optim.SGD(self.model.parameters(), lr=self.lr, momentum=0.9, weight_decay=1e-4)
-
-        # Update scheduler
         train_loader, _, _ = self.dataset.get_loaders()
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
@@ -232,54 +221,50 @@ class Pruned:
         feature_maps = {}
         all_labels = []
 
-        # Define hooks to capture intermediate activations
+        # define hooks to capture intermediate activations
         activations = {}
 
         def get_activation(name):
-            def hook(model, input, output):
+            def hook(output):
                 activations[name] = output.detach()
 
             return hook
 
-        # Register hooks for each layer
-        hooks = []
+        # register hooks for each layer
+        hooks = [self.model.encoder.layer1.register_forward_hook(get_activation(0)),
+                 self.model.encoder.layer2.register_forward_hook(get_activation(1)),
+                 self.model.encoder.layer3.register_forward_hook(get_activation(2)),
+                 self.model.encoder.layer4.register_forward_hook(get_activation(3))]
 
-        # For ResNet, we want to capture the output of each major layer block
-        # These are the high-level layer groups in ResNet
-        hooks.append(self.model.encoder.layer1.register_forward_hook(get_activation(0)))
-        hooks.append(self.model.encoder.layer2.register_forward_hook(get_activation(1)))
-        hooks.append(self.model.encoder.layer3.register_forward_hook(get_activation(2)))
-        hooks.append(self.model.encoder.layer4.register_forward_hook(get_activation(3)))
+        # for ResNet, we want to capture the output of each major layer block
+        # these are the high-level layer groups in ResNet
 
         self.model.eval()
         with torch.no_grad():
             for i, ((x, _), y) in enumerate(data_loader):
-                if i >= 10:  # Limit the number of batches for efficiency
+                if i >= 10:  # limit the number of batches for efficiency
                     break
 
                 x = x.to(self.device)
                 y = y.to(self.device)
 
-                # Forward pass to collect activations through hooks
                 _ = self.model.encoder(x)
 
-                # Store the feature maps
                 for unit_idx in activations:
                     if unit_idx not in feature_maps:
                         feature_maps[unit_idx] = []
 
-                    # Apply global average pooling to make feature dimension consistent
+                    # apply global average pooling to make feature dimension consistent
                     act = activations[unit_idx]
                     pooled_feature = nn.functional.adaptive_avg_pool2d(act, 1).squeeze(-1).squeeze(-1)
                     feature_maps[unit_idx].append(pooled_feature)
 
                 all_labels.append(y)
 
-        # Remove hooks
+        # remove hooks
         for hook in hooks:
             hook.remove()
 
-        # Convert lists to tensors
         for unit_idx in feature_maps:
             feature_maps[unit_idx] = torch.cat(feature_maps[unit_idx], dim=0)
 
@@ -290,7 +275,7 @@ class Pruned:
     def train(self, num_pruning_stages=3, pruning_interval=10):
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
-        # Early stopping
+        # early stopping
         early_stopping_patience = 100
         best_val_loss = float('inf')
         early_stopping_counter = 0
@@ -298,23 +283,20 @@ class Pruned:
         epoch_bar = tqdm(range(self.epochs), desc="Epochs", position=0)
 
         for epoch in epoch_bar:
-            # Check if it's time to prune
+            # check if it's time to prune
             if epoch > 0 and epoch % pruning_interval == 0 and len(self.active_units) > num_pruning_stages:
-                # Collect feature maps for pruning decision
+                # collect feature maps for pruning decision
                 self.logger.info(f"Collecting feature maps for pruning at epoch {epoch + 1}")
                 feature_maps, labels = self.collect_feature_maps(train_loader)
 
-                # Compute mutual information
+                # compute mutual information
                 mi_values = self.compute_mutual_information(feature_maps, labels)
                 self.logger.info(f"Mutual Information values: {mi_values}")
 
-                # Cluster and select units to keep
+                # cluster and select units to keep
                 keep_units, clusters = self.cluster_mutual_information(mi_values, num_clusters=3)
 
-                # Prune the network
                 self.prune_units(keep_units)
-
-                # Log pruning information
                 self.logger.info(f"Pruned network at epoch {epoch + 1}, keeping {len(keep_units)} units")
                 self.logger.info(f"Clusters: {clusters}")
                 self.logger.info(
@@ -347,7 +329,7 @@ class Pruned:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Validation
+            # validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "

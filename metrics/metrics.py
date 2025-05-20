@@ -25,16 +25,19 @@ class Metrics:
     def set_linear_classification(self, linear_classification):
         self.linear = linear_classification
 
-    def start_gpu_monitoring(self):
+    @staticmethod
+    def start_gpu_monitoring():
         nvmlInit()
         handle = nvmlDeviceGetHandleByIndex(0)  # GPU with index 0
         return handle
 
-    def gpu_utilization(self, handle):
+    @staticmethod
+    def gpu_utilization(handle):
         return nvmlDeviceGetUtilizationRates(handle).gpu
 
     # memory usage monitoring
-    def memory_usage(self):
+    @staticmethod
+    def memory_usage():
         process = psutil.Process(os.getpid())
         return process.memory_info().rss / (1024 ** 2)  # return in MB
 

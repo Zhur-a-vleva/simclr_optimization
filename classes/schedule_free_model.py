@@ -26,14 +26,13 @@ class ScheduleFreeSimCLR:
         self.handle = self.metrics.start_gpu_monitoring()
         self.logger = logger
 
-        # Schedule-Free AdamW параметры
+        # Schedule-Free AdamW parameters
         beta1 = 0.9
         beta2 = 0.999
         weight_decay = 1e-4
         eps = 1e-8
-        warmup_steps = int(0.05 * epochs * len(dataset.get_loaders()[0]))  # 5% от общего числа шагов
+        warmup_steps = int(0.05 * epochs * len(dataset.get_loaders()[0]))  # 5% from total number of steps
 
-        # Инициализация Schedule-Free AdamW
         self.optimizer = self._create_schedule_free_adamw(
             self.model.parameters(),
             lr=lr,
@@ -43,13 +42,10 @@ class ScheduleFreeSimCLR:
             warmup_steps=warmup_steps
         )
 
-        # Нет необходимости в scheduler, так как Schedule-Free исключает необходимость в расписании
-
     def _create_schedule_free_adamw(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-2,
                                     warmup_steps=0):
         """
-        Создает оптимизатор Schedule-Free AdamW, который реализует подход из статьи
-        "The Road Less Scheduled" для оптимизации без использования расписаний
+        Creates Schedule-Free AdamW optimizer from the paper "The Road Less Scheduled"
         """
 
         class ScheduleFreeAdamW(optim.Optimizer):
@@ -64,17 +60,14 @@ class ScheduleFreeSimCLR:
 
                 defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay, warmup_steps=warmup_steps)
                 super(ScheduleFreeAdamW, self).__init__(params, defaults)
-
-                # Инициализация глобального счетчика шагов
                 self.state['step'] = 0
 
             def step(self, closure=None):
-                """Выполняет один шаг оптимизации."""
+                """Performs a single optimization step."""
                 loss = None
                 if closure is not None:
                     loss = closure()
 
-                # Увеличение глобального счетчика шагов
                 self.state['step'] += 1
                 current_step = self.state['step']
 
@@ -85,11 +78,10 @@ class ScheduleFreeSimCLR:
                     weight_decay = group['weight_decay']
                     warmup_steps = group['warmup_steps']
 
-                    # Применение разогрева при необходимости
                     if warmup_steps > 0:
                         lr = lr * min(1.0, current_step / warmup_steps)
 
-                    # Расчет коэффициента взвешенного среднего c_t
+                    # calculation of the coefficient c_t
                     c_t = current_step / (current_step + 1)
 
                     for p in group['params']:
@@ -100,41 +92,39 @@ class ScheduleFreeSimCLR:
 
                         state = self.state[p]
 
-                        # Инициализация состояния, если необходимо
                         if len(state) == 0:
-                            state['z'] = torch.zeros_like(p.data)  # Базовая точка оптимизации
-                            state['x'] = p.data.clone()  # Текущий итерат (взвешенное среднее)
-                            state['v'] = torch.zeros_like(p.data)  # Оценка второго момента
+                            state['z'] = torch.zeros_like(p.data)  # base point of optimization
+                            state['x'] = p.data.clone()
+                            state['v'] = torch.zeros_like(p.data)  # second moment
 
-                        # Извлечение буферов
+                        # buffer extraction
                         z = state['z']
                         x = state['x']
                         v = state['v']
 
-                        # Расчет y_t (точка оценки градиента) с использованием интерполяции
+                        # calculation of y_t (gradient estimation point) using interpolation
                         y = beta1 * z + (1 - beta1) * x
 
-                        # Применение weight decay в точке оценки градиента
+                        # application of weight decay at the gradient evaluation point
                         if weight_decay != 0:
                             grad = grad.add(y, alpha=weight_decay)
 
-                        # Обновление оценки второго момента
+                        # update of the second moment estimate
                         v.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
 
-                        # Коррекция смещения для второго момента
+                        # correction of the offset for the second moment
                         v_hat = v.div(1 - beta2 ** current_step)
 
-                        # Обновление Adam
+                        # Adam update
                         denom = v_hat.sqrt().add_(eps)
-                        step_size = lr / (1 - beta1 ** current_step)  # Коррекция смещения для первого момента
+                        step_size = lr / (1 - beta1 ** current_step)  # correction of the offset for the first moment
 
-                        # Обновление z (шаг Adam)
+                        # update z (Adam step)
                         z.addcdiv_(grad, denom, value=-step_size)
 
-                        # Обновление x (взвешенное среднее)
+                        # update x
                         x.mul_(c_t).add_(z, alpha=1 - c_t)
 
-                        # Копирование x обратно в параметр
                         p.data.copy_(x)
 
                 return loss
@@ -143,7 +133,7 @@ class ScheduleFreeSimCLR:
 
     def nt_xent_loss(self, z_i, z_j):
         """
-        Нормализованная кросс-энтропия для контрастивного обучения.
+        Normalized cross-entropy loss for contrastive learning.
         """
         N = 2 * z_i.size(0)
         z = torch.cat((z_i, z_j), dim=0)
@@ -158,7 +148,7 @@ class ScheduleFreeSimCLR:
 
     def validate(self, val_loader):
         """
-        Валидация модели.
+        Validation of the model.
         """
         self.model.eval()
         val_loss = 0
@@ -174,11 +164,10 @@ class ScheduleFreeSimCLR:
 
     def train(self):
         """
-        Обучение модели с Schedule-Free AdamW.
+        Training of the model with Schedule-Free AdamW.
         """
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
-        # Параметры раннего останова
         early_stopping_patience = 100
         best_val_loss = float('inf')
         early_stopping_counter = 0
@@ -204,7 +193,7 @@ class ScheduleFreeSimCLR:
                 self.optimizer.step()
                 epoch_loss += loss.item()
 
-            # Сохранение метрик
+            # metrics calculation
             training_time = time.time() - start_time
             self.metrics.metrics["contrastive_loss"].append(epoch_loss / len(train_loader))
             self.metrics.metrics["training_time_per_epoch_sec"].append(training_time)
@@ -212,7 +201,7 @@ class ScheduleFreeSimCLR:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Валидация
+            # validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "
@@ -230,7 +219,7 @@ class ScheduleFreeSimCLR:
             else:
                 early_stopping_counter += 1
 
-            # Проверка условия раннего останова
+            # check the condition for early stopping
             if early_stopping_counter >= early_stopping_patience:
                 self.logger.info(f"Early stopping triggered at epoch {epoch + 1}")
                 break
@@ -248,7 +237,7 @@ class ScheduleFreeSimCLR:
 
     def load_best_model(self):
         """
-        Загрузка лучшей модели после обучения.
+        Load the best model.
         """
         self.best_model.load_state_dict(torch.load(f"models/{self.name}"))
         self.linear_classification = LinearClassification(self)

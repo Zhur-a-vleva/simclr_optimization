@@ -95,7 +95,7 @@ class Baseline:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Валидация
+            # validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "

@@ -41,23 +41,22 @@ class DCL:
         z_i = nn.functional.normalize(z_i, dim=1)
         z_j = nn.functional.normalize(z_j, dim=1)
 
-        # Positive similarity
+        # positive similarity
         positive_sim = torch.exp(torch.sum(z_i * z_j, dim=1) / self.t)
 
-        # All similarity for negatives
+        # all similarity for negatives
         z = torch.cat((z_i, z_j), dim=0)
         similarity_matrix = torch.matmul(z_i, z.T) / self.t
 
-        # Create mask for negatives
+        # create mask for negatives
         mask = torch.ones((N, 2 * N), dtype=bool, device=self.device)
-        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)  # Exclude self
-        mask[range(N), range(N, 2 * N)] = False  # Exclude positive
+        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)
+        mask[range(N), range(N, 2 * N)] = False
 
-        # Get negative similarities and sum them
+        # get negative similarities and sum them
         neg_sim = torch.exp(similarity_matrix) * mask
         neg_sim_sum = neg_sim.sum(dim=1)
 
-        # Compute DCL loss
         loss = -torch.log(positive_sim / neg_sim_sum)
         return loss.mean()
 
@@ -70,26 +69,25 @@ class DCL:
         z_i = nn.functional.normalize(z_i, dim=1)
         z_j = nn.functional.normalize(z_j, dim=1)
 
-        # Compute positive similarities
+        # compute positive similarities
         pos_sim = torch.sum(z_i * z_j, dim=1)
 
-        # Create weights for positive pairs based on their similarity
+        # create weights for positive pairs based on their similarity
         weights = torch.exp(-pos_sim / sigma)
 
-        # All similarity for negatives
+        # all similarity for negatives
         z = torch.cat((z_i, z_j), dim=0)
         similarity_matrix = torch.matmul(z_i, z.T) / self.t
 
-        # Create mask for negatives
+        # create mask for negatives
         mask = torch.ones((N, 2 * N), dtype=bool, device=self.device)
-        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)  # Exclude self
-        mask[range(N), range(N, 2 * N)] = False  # Exclude positive
+        mask[:, :N] = torch.eye(N, dtype=bool, device=self.device)
+        mask[range(N), range(N, 2 * N)] = False
 
-        # Get negative similarities and sum them
+        # get negative similarities and sum them
         neg_sim = torch.exp(similarity_matrix) * mask
         neg_sim_sum = neg_sim.sum(dim=1)
 
-        # Compute DCL loss with weights
         loss = -weights * torch.log(torch.exp(pos_sim / self.t) / neg_sim_sum)
         return loss.mean()
 
@@ -109,7 +107,7 @@ class DCL:
     def train(self, use_weighted=False):
         train_loader, val_loader, _ = self.dataset.get_loaders()
 
-        # Early stopping
+        # early stopping
         early_stopping_patience = 100
         best_val_loss = float('inf')
         early_stopping_counter = 0
@@ -149,7 +147,7 @@ class DCL:
             self.metrics.metrics["memory_usage_MB"].append(self.metrics.memory_usage())
             self.metrics.metrics["model_size_MB"].append(self.metrics.model_size())
 
-            # Валидация
+            # validation
             val_loss = self.validate(val_loader)
             self.logger.info(
                 f"Epoch {epoch + 1}: Training Loss: {epoch_loss / len(train_loader)}, "
@@ -198,8 +196,7 @@ class DCLW(DCL):
     def __init__(self, temperature, device, lr, epochs, dataset, logger, sigma=0.5):
         super().__init__(temperature, device, lr, epochs, dataset, logger)
         self.name = "dclw"
-        self.sigma = sigma  # Parameter for weighting function
+        self.sigma = sigma
 
-    def train(self):
-        # Call parent's train with weighted=True
+    def train(self, **kwargs):
         super().train(use_weighted=True)
