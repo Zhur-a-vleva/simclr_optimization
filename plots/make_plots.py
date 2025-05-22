@@ -267,15 +267,22 @@ plt.tight_layout()
 plt.savefig('plots/gpu_utilization_baseline.png', dpi=300)
 plt.close()
 
+import pandas as pd
+
+window = 15
+
 plt.figure(figsize=(10, 6))
 for i, (model_name, data) in enumerate(metrics_data.items()):
     if model_name == "Pruned":
         if 'gpu_utilization_percent' in data:
-            plt.plot(data['gpu_utilization_percent'], label=model_name, color=colors_diff[i])
+            gpu_util = pd.Series(data['gpu_utilization_percent'])
+            gpu_util_smooth = gpu_util.rolling(window, min_periods=1, center=True).mean()
+            plt.plot(gpu_util_smooth, label=f"{model_name} (MA{window})", color=colors_diff[i], linewidth=2)
 plt.xlabel('Epoch')
 plt.ylabel('GPU Utilization (%)')
-plt.title('GPU Utilization per Epoch. Pruned')
+plt.title('GPU Utilization per Epoch (Smoothed) — Pruned')
 plt.tight_layout()
+plt.legend()
 plt.savefig('plots/gpu_utilization_pruned.png', dpi=300)
 plt.close()
 
@@ -283,11 +290,14 @@ plt.figure(figsize=(10, 6))
 for i, (model_name, data) in enumerate(metrics_data.items()):
     if model_name == "Dynamic Sparse":
         if 'gpu_utilization_percent' in data:
-            plt.plot(data['gpu_utilization_percent'], label=model_name, color=colors_diff[i])
+            gpu_util = pd.Series(data['gpu_utilization_percent'])
+            gpu_util_smooth = gpu_util.rolling(window, min_periods=1, center=True).mean()
+            plt.plot(gpu_util_smooth, label=f"{model_name} (MA{window})", color=colors_diff[i], linewidth=2)
 plt.xlabel('Epoch')
 plt.ylabel('GPU Utilization (%)')
-plt.title('GPU Utilization per Epoch. Dynamic Sparse')
+plt.title('GPU Utilization per Epoch (Smoothed) — Dynamic Sparse')
 plt.tight_layout()
+plt.legend()
 plt.savefig('plots/gpu_utilization_dynamic_sparse.png', dpi=300)
 plt.close()
 
@@ -295,11 +305,14 @@ plt.figure(figsize=(10, 6))
 for i, (model_name, data) in enumerate(metrics_data.items()):
     if model_name == "Schedule Free SimCLR":
         if 'gpu_utilization_percent' in data:
-            plt.plot(data['gpu_utilization_percent'], label=model_name, color=colors_diff[i])
+            gpu_util = pd.Series(data['gpu_utilization_percent'])
+            gpu_util_smooth = gpu_util.rolling(window, min_periods=1, center=True).mean()
+            plt.plot(gpu_util_smooth, label=f"{model_name} (MA{window})", color=colors_diff[i], linewidth=2)
 plt.xlabel('Epoch')
 plt.ylabel('GPU Utilization (%)')
-plt.title('GPU Utilization per Epoch. Schedule Free SimCLR')
+plt.title('GPU Utilization per Epoch (Smoothed) — Schedule Free SimCLR')
 plt.tight_layout()
+plt.legend()
 plt.savefig('plots/gpu_utilization_schedule_free_simclr.png', dpi=300)
 plt.close()
 
@@ -307,11 +320,14 @@ plt.figure(figsize=(10, 6))
 for i, (model_name, data) in enumerate(metrics_data.items()):
     if model_name == "DCL":
         if 'gpu_utilization_percent' in data:
-            plt.plot(data['gpu_utilization_percent'], label=model_name, color=colors_diff[i])
+            gpu_util = pd.Series(data['gpu_utilization_percent'])
+            gpu_util_smooth = gpu_util.rolling(window, min_periods=1, center=True).mean()
+            plt.plot(gpu_util_smooth, label=f"{model_name} (MA{window})", color=colors_diff[i], linewidth=2)
 plt.xlabel('Epoch')
 plt.ylabel('GPU Utilization (%)')
-plt.title('GPU Utilization per Epoch. DCL')
+plt.title('GPU Utilization per Epoch (Smoothed) — DCL')
 plt.tight_layout()
+plt.legend()
 plt.savefig('plots/gpu_utilization_dcl.png', dpi=300)
 plt.close()
 
